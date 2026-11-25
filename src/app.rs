@@ -77,6 +77,8 @@ pub enum Mode {
     Normal,
     /// "Unlock writes on HOST?"
     Unlock { anchor: Option<(usize, usize)>, then: Then },
+    /// "Switch host?" Asked when it would disconnect a live console.
+    SwitchHost { to: usize, anchor: Option<(usize, usize)> },
     /// The power menu, on top of the open screen.
     Power,
     /// The list of keys.
@@ -357,6 +359,17 @@ impl App {
 
     // ----- hosts ------------------------------------------------------------
 
+    /// A host switch asked for by key or click. It asks first when a console
+    /// would be disconnected.
+    fn request_host(&mut self, i: usize) {
+        if i < self.hosts.len() && i != self.current && self.console_live() {
+            self.prefix_pending = false;
+            self.mode = Mode::SwitchHost { to: i, anchor: self.pointer };
+        } else {
+            self.switch_host(i);
+        }
+    }
+
     /// Make another host the one in use. Everything that belongs to the old
     /// host is dropped, and writes lock, so that an unlock never carries over.
     pub fn switch_host(&mut self, i: usize) {
@@ -583,7 +596,7 @@ impl App {
             'u' => self.toggle_lock(),
             'd' => self.toggle_details(),
             '?' => self.open_help(),
-            '1'..='9' => self.switch_host(c as usize - '1' as usize),
+            '1'..='9' => self.request_host(c as usize - '1' as usize),
             _ => self.status = format!("no console command {c:?}. {} then ? lists them.", self.prefix_name()),
         }
     }
@@ -896,7 +909,7 @@ impl App {
         // Selecting a host is not a write and works while locked.
         if self.screen == Screen::Hosts {
             if let Some(i) = self.cursor.checked_sub(1) {
-                self.switch_host(i);
+                self.request_host(i);
             }
             return;
         }
@@ -942,6 +955,7 @@ impl App {
                     self.leave_power_menu();
                 }
             }
+            Mode::SwitchHost { to, .. } => self.switch_host(to),
             Mode::Help => self.mode = Mode::Help,
             Mode::Power => self.mode = Mode::Power,
             Mode::Normal => {}
@@ -1027,7 +1041,7 @@ impl App {
                 self.refresh(s);
             }
             // Keys 1 to 9 select the first nine hosts.
-            KeyCode::Char(c @ '1'..='9') => self.switch_host(c as usize - '1' as usize),
+            KeyCode::Char(c @ '1'..='9') => self.request_host(c as usize - '1' as usize),
             KeyCode::Esc => self.focus = self.pane_cycle().into_iter().find(|p| *p != Pane::Nav).unwrap_or(Pane::Main),
             KeyCode::Down | KeyCode::Char('j') => self.step(1),
             KeyCode::Up | KeyCode::Char('k') => self.step(-1),
@@ -1130,7 +1144,7 @@ impl App {
                     self.pick();
                 }
             }
-            Hit::Host(i) => self.switch_host(i),
+            Hit::Host(i) => self.request_host(i),
             Hit::Power => self.open_power_menu(),
             // Only drawn while the menu is open, which is handled above.
             Hit::PowerItem(_) => {}
@@ -1460,6 +1474,14 @@ mod tests {
         let rx = with_console(&mut a, b"");
         ctrl(&mut a, '5');
         press(&mut a, KeyCode::Char('2'));
+        press(&mut a, KeyCode::Enter);
+        assert!(a.current == 0 && a.console_live(), "Enter alone must not switch");
+        press(&mut a, KeyCode::Esc);
+        assert!(a.current == 0 && a.typing() && sent(&rx).is_empty(), "cancel resumes typing");
+        // A click on the tab asks as well.
+        click(&mut a, Hit::Host(1));
+        assert!(matches!(a.mode, Mode::SwitchHost { to: 1, .. }));
+        click(&mut a, Hit::DialogOk);
         assert_eq!(a.current, 1);
         assert!(a.console.is_none() && a.closing.len() == 1);
         press(&mut a, KeyCode::Enter);
@@ -1742,6 +1764,11 @@ mod tests {
         for c in ['.', 'z', '[', 'p', '?'] {
             assert!(a.hits.iter().any(|(_, k)| *k == Hit::Command(c)), "hint {c}");
         }
+    }
+
+    #[test]
+    fn fan_modes_need_confirmation() {
+        assert!(ipmi::fan_actions().iter().all(|x| x.risk == Risk::High));
     }
 
     #[test]

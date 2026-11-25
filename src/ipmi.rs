@@ -103,7 +103,8 @@ pub fn control_actions() -> Vec<Action> {
 
 /// Supermicro OEM fan mode: raw 0x30 0x45 0x01 <mode>.
 pub fn fan_actions() -> Vec<Action> {
-    let m = |label: &str, b: &str| act(label, &["raw", "0x30", "0x45", "0x01", b], Risk::Low);
+    // A mode changes how the machine is cooled, so it asks first.
+    let m = |label: &str, b: &str| act(label, &["raw", "0x30", "0x45", "0x01", b], Risk::High);
     vec![m("Standard", "0x00"), m("Full speed", "0x01"), m("Optimal", "0x02"), m("Heavy IO", "0x04")]
 }
 

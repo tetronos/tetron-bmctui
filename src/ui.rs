@@ -546,6 +546,12 @@ fn dialog(app: &mut App, c: &mut Canvas) {
             "[ Unlock (y) ]",
             *anchor,
         ),
+        Mode::SwitchHost { to, anchor } => (
+            "Switch host",
+            vec![format!("Switch to {}?", app.hosts[*to].describe()), format!("The console on {} disconnects.", app.t.describe())],
+            "[ Switch (y) ]",
+            *anchor,
+        ),
         Mode::Confirm { act, anchor, .. } => (
             "Confirm",
             vec![format!("Run on {}:", app.t.describe()), act.label.clone(), format!("ipmitool {}", act.args.join(" "))],

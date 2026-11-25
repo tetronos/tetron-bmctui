@@ -217,7 +217,7 @@ fn menu_screen(s: Screen, c: &Ctx) -> Vec<Line> {
     } else {
         v.push(("Supermicro OEM raw command 0x30 0x45.".into(), Kind::Dim));
         v.push(("Boards differ: check the mode and fan speeds after a change.".into(), Kind::Warn));
-        v.push(("A mode runs at once. Actions need unlock (u).".into(), Kind::Dim));
+        v.push(("A mode asks for confirmation. Actions need unlock (u).".into(), Kind::Dim));
     }
     if !notes.is_empty() {
         v.push((String::new(), Kind::Normal));
