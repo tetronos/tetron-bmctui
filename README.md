@@ -1,122 +1,173 @@
 # tetron-bmctui
 
-Terminal UI for server BMCs (IPMI now, Redfish planned). Part of the tetron suite; works without tetron.
+A terminal UI for server BMCs: sensors, event log, power control and a serial console in one window, over IPMI. It works with mouse or keyboard, locally or over SSH.
 
-**Status: early development.** It wraps `ipmitool` and is written for Supermicro BMCs first. Hardware testing is limited to one Supermicro board, and not every action has been tried on it. Expect changes.
+It uses `ipmitool` and is written for Supermicro BMCs first. It is part of the tetron suite and works without tetron.
 
-## What works
+> **Early development.** Hardware testing is limited to one Supermicro H12 board. Not every action has been verified on hardware. Check the result of anything that changes your server.
 
-- Screens: Overview, Sensors, Events, Inventory (FRU), Power (power control, identify LED, clear event log, BMC cold reset) and Fans (Supermicro fan mode).
-- Host list: several BMCs in one run, picked from the top bar or the Hosts screen.
-- Filter on Sensors, Events and Inventory, a help window, and export of a screen to a text file.
-- One-time boot device (PXE, disk, CD/DVD, BIOS setup) on the Power screen.
-- Mouse and keyboard control. Panes adapt to the terminal width.
-- Serial console in a pane with scrollback and zoom, through `ipmitool sol activate`. `S` runs it full screen instead.
+## Features
 
-Fan control uses Supermicro OEM raw commands. Boards differ, so check the mode and the fan speeds after a change. It is not available for other vendors yet.
-
-Not built yet: Redfish and virtual media.
+- **Serial console in a pane** (serial over LAN) with BIOS colors, scrollback and zoom.
+- **Power menu on top of any screen**, so you can power cycle a server while watching its console.
+- **Several servers:** keep a host list and switch with a key or a click.
+- **Status screens:** overview, sensors, event log and hardware inventory, with a filter and export to a text file.
+- **Power and boot:** power control, identify LED, and boot device for the next boot (network, disk, CD/DVD, BIOS setup).
+- **Fan mode** on Supermicro boards.
+- **Safe by default:** it starts read-only, dangerous actions ask for confirmation, and actions are written to an audit log.
 
 ## Requirements
 
-Linux, [ipmitool](https://github.com/ipmitool/ipmitool), and Rust 1.91 or newer to build.
+- Linux
+- [ipmitool](https://github.com/ipmitool/ipmitool)
+- A BMC with IPMI over LAN enabled, or local access through `/dev/ipmi0`
+- Rust 1.91 or newer, only to build from source
 
-## Build and run
+## Install
 
+Download a binary from the [releases page](https://github.com/tetronos/tetron-bmctui/releases). It is for x86_64 Linux with glibc 2.39 or newer, for example Ubuntu 24.04.
+
+Or build from source:
+
+    git clone https://github.com/tetronos/tetron-bmctui
+    cd tetron-bmctui
     cargo build --release
-    target/release/tetron-bmctui -H 192.168.1.20 -U ADMIN --pass-file ~/.bmc-pass
 
-The password file holds only the password and must have mode 0600. The `IPMI_PASSWORD` environment variable works instead of `--pass-file`. The password is never accepted on the command line. Without `-H`, `ipmitool` talks to the local BMC. `BMC_HOST` and `BMC_USER` can replace `-H` and `-U`.
+The program is then `target/release/tetron-bmctui`.
 
-    tetron-bmctui --dump sensors    # print one screen as text and exit
+## Quick start
 
-## Host list
+Put the BMC password in a file that only you can read:
 
-To work with several BMCs, put them in `~/.config/tetron-bmctui/hosts.toml` (mode 0600). It is used when neither `-H` nor `BMC_HOST` is given. `--hosts FILE` names another file and `--select NAME` picks the first host.
+    (umask 077; cat > ~/.bmc-pass)     # type the password, press Enter, then Ctrl-D
+
+Connect, using the address and user of your BMC:
+
+    tetron-bmctui -H 192.0.2.10 -U ADMIN --pass-file ~/.bmc-pass
+
+The `IPMI_PASSWORD` environment variable works instead of `--pass-file`. The password is never accepted on the command line. `BMC_HOST` and `BMC_USER` can replace `-H` and `-U`. Without a host, `ipmitool` talks to the local BMC.
+
+To print one screen as text, for example in a script:
+
+    tetron-bmctui -H 192.0.2.10 -U ADMIN --pass-file ~/.bmc-pass --dump sensors
+
+Run `tetron-bmctui --help` for all options.
+
+## Several servers
+
+List your servers in `~/.config/tetron-bmctui/hosts.toml`:
 
 ```toml
 [[host]]
-name = "testbox"
-address = "192.168.1.20"
+name = "web01"
+address = "192.0.2.11"
 user = "ADMIN"                 # optional
-pass_file = "~/.bmc-pass"      # required, mode 0600
+pass_file = "~/.bmc-pass"      # required
 interface = "lanplus"          # optional: lanplus or lan
+
+[[host]]
+name = "db01"
+address = "192.0.2.12"
+user = "ADMIN"
+pass_file = "~/.bmc-pass-db01"
 ```
 
-The file holds no passwords. Every host needs its own `pass_file` entry, and `IPMI_PASSWORD` is not used with a list. Only the selected host is contacted. Switching hosts locks writes. While a console is connected, switching asks first, since it disconnects.
+The list and every password file must have mode 0600 (`chmod 600`). The list holds no passwords, only the path of each password file.
 
-## Without a BMC
+The list is used when neither `-H` nor `BMC_HOST` is given. `--hosts FILE` names another list and `--select NAME` chooses the first server. Only the selected server is contacted, and each tab shows when its state was last checked.
 
-To look at the interface without a BMC, run from the repository directory (readings are fake and actions report a failure, but they are still written to the audit log):
+## Keys and mouse
 
-    env -u BMC_HOST -u BMC_USER target/release/tetron-bmctui --ipmitool "$PWD/tests/fake-ipmitool.sh"
-
-## Controls
-
-Click screens, rows, buttons and key hints. The wheel scrolls the pane under the pointer. Hold Shift while dragging to select text, in terminals that support it.
+You can click screens, host tabs, rows, buttons and key hints. The mouse wheel scrolls the pane under the pointer. In most terminals, hold Shift while dragging to select text.
 
 | Key | Function |
 |---|---|
-| `1` to `9` | switch host |
 | `Tab`, `Shift-Tab` | next or previous pane |
-| arrows, `j`, `k` | move in the focused pane |
-| `Enter` | open a screen or run the selected action |
+| arrows, `j`, `k` | move |
+| `Enter` | open a screen, run an action or connect the console |
 | `u` | unlock or lock writes |
 | `p` | power menu |
+| `1` to `9` | switch server |
+| `/` | filter sensors, events or inventory; `Esc` clears it |
+| `e` | export the screen |
 | `d` | show or hide details |
-| `/` | filter lines, `Enter` keeps it, `Esc` clears it |
-| `e` | export the screen, as filtered |
-| `?` | help |
 | `r` | refresh |
-| `S` | serial console, full screen (needs unlock) |
+| `S` | full screen serial console |
+| `?` | help |
 | `q` | quit |
 
-Below 97 columns one pane is shown, and the navigation opens from `[menu]` or with `Tab`.
+In a narrow terminal one pane is shown at a time. Open the screen list with `[menu]` or `Tab`.
 
-## Console
+## Serial console
 
-Open the Console screen and press `Enter` or click `[ Connect (Enter) ]`. Connecting needs unlock. After that, all keys go to the host while the console pane has the focus, with no further prompt. Click another pane, or use the command key `Ctrl-]` followed by:
+Open the **Console** screen and press `Enter`. Unlock when asked. Your keys then go to the server for as long as the console pane has the focus.
+
+Press `Ctrl-]`, then:
 
 | Key | Function |
 |---|---|
 | `.` | disconnect |
 | `z` | zoom to the whole terminal, or back |
 | `p` | power menu |
-| `[` | scroll back with arrows, `PgUp`, `PgDn`, `Home`; any other key returns |
-| `Tab` | next pane |
-| `u`, `d`, `1` to `9`, `q`, `?` | lock or unlock, details, host, quit, list commands |
-| `Ctrl-]` | send `Ctrl-]` to the host |
+| `[` | scroll back with arrows, `PgUp`, `PgDn` and `Home`; any other key returns |
+| `Tab` | leave the console pane |
+| `u`, `d`, `1` to `9`, `q`, `?` | lock or unlock, details, switch server, quit, help |
+| `Ctrl-]` | send `Ctrl-]` to the server |
 
-The mouse wheel scrolls back at any time. Mouse events are not sent to the host. Colors and text styles of the host are shown, in the colors of your terminal. `--console-mono` leaves the colors out. The screen is emulated at 100x31, which AMI BIOS setup commonly draws over serial; 80x24 output fits inside it. A smaller pane shows the part around the cursor and is marked as cropped, so make the terminal larger or zoom (a terminal of at least 100x31 shows all of it zoomed). Serial over LAN does not replay earlier output: after connecting, the screen stays blank until the host prints, so press an arrow key in a quiet BIOS menu. `--console-size`, `--scrollback` (default 50000 lines) and `--prefix` change this. `ipmitool` keeps its own escape: `Enter`, `~`, `.` also ends the session.
+Tips:
 
-If another session holds the console, `t` offers to end it, after unlock and confirmation. Not built yet: console log, search, copy, reconnect and an on-screen panel for function keys. On real hardware it has been tried on one Supermicro H12 board.
+- **Blank screen after connecting?** Serial over LAN does not repeat earlier output. Press a key to make the server print something. In BIOS setup, an arrow key is safer than `Enter`.
+- **Screen cut off?** The console is 100x31 characters, a size BIOS setup often uses. Make your terminal larger or zoom. A terminal of at least 100x31 shows all of it when zoomed. `--console-size` changes the size.
+- **Colors:** the console shows the colors of the server. `--console-mono` turns them off.
+- **Another session is open?** A BMC normally allows one console session. Press `t` to end the other one, after unlock and confirmation.
+- **Escape sequence:** `ipmitool` also ends the session when you type `Enter`, `~`, `.`.
+- **Other options:** `--prefix` changes the `Ctrl-]` command key. `--scrollback` sets how many lines are kept (default 50000).
 
-## Power menu
+For output to appear, serial over LAN and console redirection must be set up in the server's BMC and BIOS settings. For an operating system console, the system must also use the matching serial port.
 
-`[ Power ]` in the top bar, or `p`, opens the power actions on top of the current screen. In a connected console use `Ctrl-]` then `p`. The console stays connected and visible around the menu, and no keys reach the host while it is open. The menu names the host and reads its power state each time it opens. The rules are those of the Power screen. `Esc` or `[ Cancel (Esc) ]` closes the menu, or steps back to it from a confirmation. Clicks outside it do nothing.
+## Power and boot
 
-## Events, export and next boot
+Click `[ Power ]` at the top, or press `p`. In a connected console press `Ctrl-]`, then `p`. The menu shows the server's name, address and power state. `Esc` or `[ Cancel (Esc) ]` closes it.
 
-Exports are new files with mode 0600 in `~/.local/state/tetron-bmctui/exports/`, or in `--export-dir`. They can contain serial numbers and addresses.
+The "Next boot" actions set the boot device for one boot only. Use `--efi-boot` to request UEFI boot. Server boards differ in how they handle these requests, so watch the console to check the result.
 
-In the event log, data of an OEM record is also shown as text when it is readable UTF-16. Records that `ipmitool` can not name stay unnamed, and the details pane says so.
+## Fans
 
-The "Next boot" actions run `ipmitool chassis bootdev`, which applies to one boot. `--efi-boot` adds `options=efiboot`. Boards differ in how they treat this, and it is not yet tested on hardware.
+Fan modes use Supermicro-specific commands and are available on Supermicro BMCs only. Boards differ. **After changing a mode, check the fan speeds and temperatures.**
 
 ## Safety
 
-- The program starts read-only. Unlocking asks once and names the host.
-- After unlock, only the identify LED runs at once. Fan modes, power on, soft shutdown, power off, cycle, reset, BMC cold reset, clearing the event log and the next boot actions also ask for confirmation. `Enter` alone does not confirm.
-- Writes lock again after 15 idle minutes. `--relock MINUTES` changes this and `0` turns it off. **A connected console is not locked by this:** anyone at your terminal can keep typing into the host until you disconnect.
-- Actions and serial console sessions are recorded in `~/.local/state/tetron-bmctui/audit.log`. An action is refused if the record can not be written. Console keystrokes are not recorded.
-- Automatic refresh stops after an apparent login or connection failure, because repeated wrong passwords can lock a BMC account.
-- Text from the BMC is filtered to printable ASCII on screen and in `--dump`. The console pane draws only what its terminal emulator parsed. **The full screen serial console (`S`) is not filtered:** output from the host goes to your terminal as it is.
+- The program starts **read-only**. Unlocking asks once and names the server.
+- After unlock, only the identify LED runs without confirmation. All other actions ask first, and `Enter` alone does not confirm.
+- Switching servers locks writes. While a console is connected, switching asks first because it disconnects.
+- Writes lock again after 15 minutes without input. `--relock MINUTES` changes this, and `0` turns it off.
+- **A connected console stays usable after this lock.** Anyone at your terminal can type into the server until you disconnect.
+- Actions and console sessions are recorded in `~/.local/state/tetron-bmctui/audit.log`. An action is refused if it can not be recorded. Keystrokes are never recorded.
+- After an apparent login or connection failure, automatic refresh stops, because repeated wrong passwords can lock a BMC account.
+- Text from the BMC and the console pane is filtered before it reaches your terminal. **The full screen console (`S`) is not filtered.**
+- Exports are new files that only you can read, in `~/.local/state/tetron-bmctui/exports/` or the folder given with `--export-dir`. They can contain serial numbers and addresses.
+- IPMI over LAN has known security weaknesses. Keep BMCs on a private management network or a VPN, never on the open internet.
 
-## Tests
+## Limitations
+
+- IPMI only. There is no Redfish or virtual media support, so installation images can not be mounted.
+- The console has no log file, search or copy mode.
+- The event log can contain records that `ipmitool` can not name. The details pane says when a record is unknown.
+- A "No response to keepalive" console disconnect has been seen once. If the console ends unexpectedly, press `Enter` to connect again.
+
+## Try it without a server
+
+From the source folder, this runs the interface with fake readings. Actions are not sent to any hardware, but they are written to the audit log:
+
+    env -u BMC_HOST -u BMC_USER target/release/tetron-bmctui --ipmitool "$PWD/tests/fake-ipmitool.sh"
+
+If you have a host list, add `XDG_CONFIG_HOME=/nonexistent` after `env -u BMC_HOST -u BMC_USER`.
+
+## Development
 
     cargo test
 
-The tests use no real BMC.
+The tests use no real BMC. Please report problems on the [issues page](https://github.com/tetronos/tetron-bmctui/issues), with your server board model and BMC firmware version. Remove passwords, addresses and serial numbers first.
 
 ## License
 
