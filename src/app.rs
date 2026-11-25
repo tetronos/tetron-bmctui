@@ -25,7 +25,7 @@ pub enum NavItem {
     Page(Screen),
 }
 
-pub const NAV: [NavItem; 7] = [
+pub const NAV: [NavItem; 8] = [
     NavItem::Console,
     NavItem::Page(Screen::Dash),
     NavItem::Page(Screen::Sensors),
@@ -33,6 +33,7 @@ pub const NAV: [NavItem; 7] = [
     NavItem::Page(Screen::Fru),
     NavItem::Page(Screen::Control),
     NavItem::Page(Screen::Fan),
+    NavItem::Page(Screen::Hosts),
 ];
 
 const CONSOLE_REASON: &str = "console pane is not built yet. S opens ipmitool serial over LAN full screen.";
@@ -56,6 +57,8 @@ pub enum Hit {
     Row(usize),
     /// The run button in the details pane.
     Run,
+    /// A host tab in the top bar, by index in `App::hosts`.
+    Host(usize),
     /// A key hint or button that stands for a key press.
     Key(KeyCode),
     /// The accept button of the open dialog.
@@ -76,15 +79,33 @@ pub enum Mode {
     Confirm { act: Action, anchor: Option<(usize, usize)> },
 }
 
-/// Results coming back from worker threads.
+/// Results coming back from worker threads. Each carries the `epoch` it was
+/// started in. The epoch changes on every host switch, so a late reply from
+/// the previous host can not be shown as data of the new one.
 pub enum Msg {
-    Data(Screen, Result<String, String>),
-    Done(String, Result<String, String>),
-    Vendor(Option<u32>),
+    Data(u64, Screen, Result<String, String>),
+    /// Also carries the host name, to say where a late result belongs.
+    Done(u64, String, String, Result<String, String>),
+    Vendor(u64, Option<u32>),
+}
+
+/// What is remembered about a host while another one is in use.
+#[derive(Clone, Copy, Default)]
+pub struct HostState {
+    /// Result of the latest fetch: `None` until the first one returns.
+    pub session_ok: Option<bool>,
+    /// Auto refresh is stopped after a login failure. This is per host, so that
+    /// switching away and back does not start retrying a wrong password.
+    halt_auto: bool,
 }
 
 pub struct App {
+    /// The host in use. Always a copy of `hosts[current]`.
     pub t: Target,
+    pub hosts: Vec<Target>,
+    pub current: usize,
+    pub states: Vec<HostState>,
+    pub epoch: u64,
     pub screen: Screen,
     pub data: HashMap<Screen, Result<String, String>>,
     pub loading: HashSet<Screen>,
@@ -108,9 +129,6 @@ pub struct App {
     pub status: String,
     pub vendor: Option<u32>,
     vendor_pending: bool,
-    /// Result of the latest fetch: `None` until the first one returns.
-    pub session_ok: Option<bool>,
-    halt_auto: bool,
     pub want_sol: bool,
     pub quit: bool,
     /// Confirmed or harmless actions waiting to be run by the main loop.
@@ -128,9 +146,14 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(t: Target, relock: Option<Duration>, tx: Sender<Msg>) -> App {
+    /// `hosts` must not be empty and `current` must be an index into it.
+    pub fn new(hosts: Vec<Target>, current: usize, relock: Option<Duration>, tx: Sender<Msg>) -> App {
         App {
-            t,
+            t: hosts[current].clone(),
+            states: vec![HostState::default(); hosts.len()],
+            hosts,
+            current,
+            epoch: 0,
             screen: Screen::Dash,
             data: HashMap::new(),
             loading: HashSet::new(),
@@ -148,8 +171,6 @@ impl App {
             status: "u unlocks writes".into(),
             vendor: None,
             vendor_pending: false,
-            session_ok: None,
-            halt_auto: false,
             want_sol: false,
             quit: false,
             queue: vec![],
@@ -167,13 +188,13 @@ impl App {
 
     /// Fetch a screen in a worker thread. At most one fetch per screen runs.
     pub fn refresh(&mut self, s: Screen) {
-        if !self.loading.insert(s) {
+        if s == Screen::Hosts || !self.loading.insert(s) {
             return;
         }
         self.last.insert(s, Instant::now());
-        let (t, tx) = (self.t.clone(), self.tx.clone());
+        let (t, tx, epoch) = (self.t.clone(), self.tx.clone(), self.epoch);
         std::thread::spawn(move || {
-            let _ = tx.send(Msg::Data(s, ipmi::fetch(&t, s)));
+            let _ = tx.send(Msg::Data(epoch, s, ipmi::fetch(&t, s)));
         });
     }
 
@@ -183,34 +204,41 @@ impl App {
             return;
         }
         self.vendor_pending = true;
-        let (t, tx) = (self.t.clone(), self.tx.clone());
+        let (t, tx, epoch) = (self.t.clone(), self.tx.clone(), self.epoch);
         std::thread::spawn(move || {
-            let _ = tx.send(Msg::Vendor(ipmi::fetch_vendor(&t)));
+            let _ = tx.send(Msg::Vendor(epoch, ipmi::fetch_vendor(&t)));
         });
     }
 
     pub fn on_msg(&mut self, m: Msg) {
         match m {
-            Msg::Data(s, r) => {
+            // Replies for a host that is no longer in use are dropped.
+            Msg::Data(e, ..) | Msg::Vendor(e, _) if e != self.epoch => {}
+            Msg::Data(_, s, r) => {
                 self.loading.remove(&s);
-                self.session_ok = Some(r.is_ok());
+                self.states[self.current].session_ok = Some(r.is_ok());
                 if let Err(e) = &r
                     && ipmi::looks_like_auth_error(e)
                 {
-                    self.halt_auto = true;
+                    self.states[self.current].halt_auto = true;
                     self.status = "connection or login failed: auto refresh stopped (wrong password can lock the BMC account). r retries once.".into();
                 }
                 self.data.insert(s, r);
             }
-            Msg::Vendor(v) => {
+            Msg::Vendor(_, v) => {
                 self.vendor_pending = false;
                 self.vendor = v;
             }
-            Msg::Done(label, r) => {
+            // The outcome of an action is always reported, also after a switch.
+            Msg::Done(epoch, host, label, r) => {
+                let label = if epoch == self.epoch { label } else { format!("{host}: {label}") };
                 self.status = match r {
                     Ok(o) => format!("{label}: ok {}", o.trim().lines().next().unwrap_or("")),
                     Err(e) => format!("{label}: FAILED {e}"),
                 };
+                if epoch != self.epoch {
+                    return;
+                }
                 // A write can change these, so cached copies are dropped.
                 for s in [Screen::Control, Screen::Fan, Screen::Dash, Screen::Sel] {
                     self.data.remove(&s);
@@ -231,7 +259,7 @@ impl App {
             self.lock(&format!("locked after {} min without input", limit.as_secs() / 60));
             changed = true;
         }
-        if !self.halt_auto && matches!(self.screen, Screen::Dash | Screen::Sensors) {
+        if !self.states[self.current].halt_auto && matches!(self.screen, Screen::Dash | Screen::Sensors) {
             let s = self.screen;
             if self.last.get(&s).is_none_or(|t| now.saturating_duration_since(*t) > Duration::from_secs(10)) {
                 self.refresh(s);
@@ -247,10 +275,52 @@ impl App {
         self.last_input = Instant::now();
     }
 
+    // ----- hosts ------------------------------------------------------------
+
+    /// Make another host the one in use. Everything that belongs to the old
+    /// host is dropped, and writes lock, so that an unlock never carries over.
+    pub fn switch_host(&mut self, i: usize) {
+        let Some(t) = self.hosts.get(i).cloned() else {
+            self.status = format!("there is no host {}", i + 1);
+            return;
+        };
+        if i == self.current {
+            return;
+        }
+        self.lock("writes locked");
+        self.queue.clear();
+        self.want_sol = false;
+        self.current = i;
+        self.t = t;
+        self.epoch += 1;
+        self.data.clear();
+        self.loading.clear();
+        self.last.clear();
+        self.vendor = None;
+        self.vendor_pending = false;
+        self.status = format!("host {}: read-only", self.t.describe());
+        if !self.states[i].halt_auto {
+            self.start_vendor();
+        } else {
+            self.status = format!("host {}: auto refresh is stopped after a failure. r retries once.", self.t.describe());
+        }
+        // The host screen stays as it is. Other screens are fetched again.
+        if self.screen != Screen::Hosts {
+            self.switch(self.screen);
+        }
+    }
+
     // ----- screen content ---------------------------------------------------
 
     fn ctx(&self) -> view::Ctx<'_> {
-        view::Ctx { data: self.data.get(&self.screen), vendor: self.vendor, cursor: self.cursor, loading: self.loading.contains(&self.screen) }
+        view::Ctx {
+            data: self.data.get(&self.screen),
+            vendor: self.vendor,
+            cursor: self.cursor,
+            loading: self.loading.contains(&self.screen),
+            hosts: &self.hosts,
+            current: self.current,
+        }
     }
 
     pub fn lines(&self) -> Vec<view::Line> {
@@ -270,9 +340,14 @@ impl App {
         if self.menu().is_empty() { self.cursor } else { view::MENU_FIRST_LINE + self.cursor }
     }
 
-    /// First line that can be selected. The sensor table starts with a header.
+    /// First line that can be selected. The sensor and host tables start with
+    /// a header.
     pub fn first_row(&self) -> usize {
-        if self.screen == Screen::Sensors && matches!(self.data.get(&self.screen), Some(Ok(_))) { 1 } else { 0 }
+        match self.screen {
+            Screen::Hosts => 1,
+            Screen::Sensors if matches!(self.data.get(&self.screen), Some(Ok(_))) => 1,
+            _ => 0,
+        }
     }
 
     pub fn max_scroll(&self) -> usize {
@@ -296,7 +371,12 @@ impl App {
     /// Move the selection of the main pane by `delta` rows.
     fn move_cursor(&mut self, delta: isize) {
         let items = self.menu().len();
-        let (low, high) = if items > 0 { (0, items - 1) } else { (self.first_row(), self.lines().len().saturating_sub(1)) };
+        let (low, high) = match self.screen {
+            // Only the host rows, not the note below them.
+            Screen::Hosts => (1, self.hosts.len()),
+            _ if items > 0 => (0, items - 1),
+            _ => (self.first_row(), self.lines().len().saturating_sub(1)),
+        };
         self.cursor = self.cursor.saturating_add_signed(delta).clamp(low, high.max(low));
         self.detail_scroll = 0;
         self.follow_cursor();
@@ -361,8 +441,11 @@ impl App {
         self.detail_scroll = 0;
         self.cursor = 0;
         self.cursor = if self.menu().is_empty() { self.first_row() } else { 0 };
+        if s == Screen::Hosts {
+            self.cursor = self.current + 1;
+        }
         let stale = self.last.get(&s).is_none_or(|t| t.elapsed() > Duration::from_secs(5));
-        if stale && !self.halt_auto {
+        if stale && !self.states[self.current].halt_auto {
             self.refresh(s);
         }
     }
@@ -400,6 +483,13 @@ impl App {
     /// Run the selected menu item. Harmless actions run at once, sensitive ones
     /// open a confirmation dialog.
     pub fn pick(&mut self) {
+        // Selecting a host is not a write and works while locked.
+        if self.screen == Screen::Hosts {
+            if let Some(i) = self.cursor.checked_sub(1) {
+                self.switch_host(i);
+            }
+            return;
+        }
         let items = self.menu();
         let Some(a) = items.get(self.cursor).cloned() else { return };
         if !self.unlocked {
@@ -466,16 +556,15 @@ impl App {
             KeyCode::Char('u') => self.toggle_lock(),
             KeyCode::Char('S') => self.open_sol(),
             KeyCode::Char('r') => {
-                self.halt_auto = false;
+                self.states[self.current].halt_auto = false;
                 if self.vendor.is_none() {
                     self.start_vendor();
                 }
                 let s = self.screen;
                 self.refresh(s);
             }
-            // Keys 1 to 9 select hosts. There is one host until the host list
-            // is built.
-            KeyCode::Char('1'..='9') => self.status = "only one host: the host list is not built yet".into(),
+            // Keys 1 to 9 select the first nine hosts.
+            KeyCode::Char(c @ '1'..='9') => self.switch_host(c as usize - '1' as usize),
             KeyCode::Esc => self.focus = self.pane_cycle().into_iter().find(|p| *p != Pane::Nav).unwrap_or(Pane::Main),
             KeyCode::Down | KeyCode::Char('j') => self.step(1),
             KeyCode::Up | KeyCode::Char('k') => self.step(-1),
@@ -551,7 +640,12 @@ impl App {
             Hit::Row(line) => {
                 self.focus = Pane::Main;
                 self.detail_scroll = 0;
-                if self.menu().is_empty() {
+                if self.screen == Screen::Hosts {
+                    if (1..=self.hosts.len()).contains(&line) {
+                        self.cursor = line;
+                        self.pick();
+                    }
+                } else if self.menu().is_empty() {
                     if line >= self.first_row() {
                         self.cursor = line;
                     }
@@ -564,6 +658,7 @@ impl App {
                     self.pick();
                 }
             }
+            Hit::Host(i) => self.switch_host(i),
             Hit::Run => self.pick(),
             Hit::Key(k) => self.key(k, KeyModifiers::NONE),
             Hit::DialogOk | Hit::DialogCancel => {}
@@ -598,10 +693,10 @@ mod tests {
     /// An app whose ipmitool does not exist: fetches fail harmlessly, and
     /// actions stay in the queue because no main loop runs them.
     fn app(w: usize, h: usize) -> App {
-        let t = Target { bin: "/nonexistent/ipmitool".into(), host: Some("testbox".into()), user: None, iface: "lanplus".into(), pass_file: None };
+        let t = Target { bin: "/nonexistent/ipmitool".into(), name: None, host: Some("testbox".into()), user: None, iface: "lanplus".into(), pass_file: None };
         let (tx, rx) = mpsc::channel();
         std::mem::forget(rx);
-        let mut a = App::new(t, Some(Duration::from_secs(900)), tx);
+        let mut a = App::new(vec![t], 0, Some(Duration::from_secs(900)), tx);
         ui::draw(&mut a, w, h);
         a
     }
@@ -752,6 +847,98 @@ mod tests {
         click(&mut a, Hit::Nav(0));
         assert_eq!(a.screen, Screen::Dash);
         assert!(a.status.contains("not built"));
+    }
+
+    /// An app with two named hosts, "one" and "two".
+    fn two_hosts() -> App {
+        let mut a = app(120, 28);
+        let mut one = a.t.clone();
+        one.name = Some("one".into());
+        let two = Target { name: Some("two".into()), host: Some("otherbox".into()), ..one.clone() };
+        a.t = one.clone();
+        a.hosts = vec![one, two];
+        a.states = vec![HostState::default(); 2];
+        ui::draw(&mut a, 120, 28);
+        a
+    }
+
+    #[test]
+    fn host_switch_locks_and_drops_the_old_host() {
+        let mut a = two_hosts();
+        open_power(&mut a);
+        unlock(&mut a);
+        press(&mut a, KeyCode::Enter); // queued for host one
+        a.data.insert(Screen::Fru, Ok("fru of one".into()));
+        a.vendor = Some(ipmi::SUPERMICRO_ID);
+        let old = a.epoch;
+        press(&mut a, KeyCode::Char('2'));
+        assert_eq!(a.t.label(), "two");
+        assert!(!a.unlocked && a.queue.is_empty() && a.vendor.is_none());
+        assert!(!a.data.contains_key(&Screen::Fru));
+        // Late replies from host one are ignored.
+        a.on_msg(Msg::Data(old, Screen::Fru, Ok("late".into())));
+        a.on_msg(Msg::Vendor(old, Some(1)));
+        assert!(!a.data.contains_key(&Screen::Fru) && a.vendor.is_none());
+        // A late action result is still reported, with the host name.
+        a.on_msg(Msg::Done(old, "one".into(), "Power on".into(), Ok(String::new())));
+        assert!(a.status.starts_with("one: Power on: ok"), "{}", a.status);
+    }
+
+    #[test]
+    fn host_switch_closes_the_dialog_by_key_and_mouse() {
+        let mut a = two_hosts();
+        click(&mut a, Hit::Host(1));
+        assert_eq!(a.current, 1);
+        // With a dialog open neither digits nor tabs switch the host.
+        press(&mut a, KeyCode::Char('u'));
+        press(&mut a, KeyCode::Char('1'));
+        assert_eq!(a.current, 1);
+        press(&mut a, KeyCode::Esc);
+        press(&mut a, KeyCode::Char('9'));
+        assert_eq!(a.current, 1);
+    }
+
+    #[test]
+    fn hosts_screen_selects_with_keys_and_mouse() {
+        let mut a = two_hosts();
+        a.switch(Screen::Hosts);
+        ui::draw(&mut a, 120, 28);
+        press(&mut a, KeyCode::Down);
+        press(&mut a, KeyCode::Down);
+        assert_eq!((a.cursor, a.current), (2, 0), "moving does not switch");
+        press(&mut a, KeyCode::Enter);
+        assert_eq!((a.current, a.screen), (1, Screen::Hosts));
+        click(&mut a, Hit::Row(1));
+        assert_eq!(a.current, 0);
+    }
+
+    #[test]
+    fn login_failure_stays_halted_across_a_switch() {
+        let mut a = two_hosts();
+        let e = a.epoch;
+        a.on_msg(Msg::Data(e, Screen::Dash, Err("Unable to establish RMCP+ session".into())));
+        press(&mut a, KeyCode::Char('2'));
+        press(&mut a, KeyCode::Char('1'));
+        assert!(!a.loading.contains(&Screen::Dash), "no automatic retry");
+        a.tick(Instant::now() + Duration::from_secs(60));
+        assert!(!a.loading.contains(&Screen::Dash));
+        press(&mut a, KeyCode::Char('r'));
+        assert!(a.loading.contains(&Screen::Dash));
+    }
+
+    #[test]
+    fn host_tabs_keep_the_current_one_visible() {
+        let mut a = two_hosts();
+        let base = a.hosts[0].clone();
+        a.hosts = (0..12).map(|i| Target { name: Some(format!("host-number-{i}")), ..base.clone() }).collect();
+        a.states = vec![HostState::default(); 12];
+        for i in [0, 5, 11] {
+            a.switch_host(i);
+            for w in [40, 80, 120] {
+                ui::draw(&mut a, w, 28);
+                assert!(a.hits.iter().any(|(_, h)| *h == Hit::Host(i)), "host {i} at width {w}");
+            }
+        }
     }
 
     #[test]

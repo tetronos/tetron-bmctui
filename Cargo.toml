@@ -11,6 +11,7 @@ publish = false
 
 [dependencies]
 crossterm = "0.29"
+toml = { version = "1.2.3", default-features = false, features = ["parse", "serde"] }
 
 [profile.release]
 lto = "thin"

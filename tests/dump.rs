@@ -11,6 +11,8 @@ fn fake() -> String {
 fn dump(screen: &str, extra: &[&str], password: Option<&str>) -> Output {
     let mut c = Command::new(bin());
     c.args(["--ipmitool", &fake(), "--dump", screen]).args(extra).env_remove("IPMI_PASSWORD").env_remove("BMC_HOST").env_remove("BMC_USER");
+    // A real host list of the person running the tests must not be picked up.
+    c.env("XDG_CONFIG_HOME", "/nonexistent");
     if let Some(p) = password {
         c.env("IPMI_PASSWORD", p);
     }
@@ -81,4 +83,34 @@ fn pass_file_must_be_private() {
     let o = dump("sensors", &["-H", "h", "--pass-file", p.to_str().unwrap()], None);
     assert!(o.status.success());
     let _ = std::fs::remove_file(&p);
+}
+
+#[test]
+fn host_list() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = std::env::temp_dir().join(format!("tetron-bmctui-hosts-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let write = |name: &str, text: &str, mode: u32| {
+        let p = dir.join(name);
+        std::fs::write(&p, text).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(mode)).unwrap();
+        p.to_str().unwrap().to_string()
+    };
+    let pw = write("pw", "s3cret\n", 0o600);
+    let entry = |n: &str, a: &str| format!("[[host]]\nname='{n}'\naddress='{a}'\npass_file='{pw}'\n");
+    let list = write("hosts.toml", &(entry("one", "10.0.0.1") + &entry("two", "10.0.0.2")), 0o600);
+
+    let o = dump("hosts", &["--hosts", &list, "--select", "two"], None);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert!(text(&o).contains("* two"), "{}", text(&o));
+    assert!(dump("sensors", &["--hosts", &list], None).status.success());
+
+    for bad in [vec!["--hosts", &list, "--select", "nope"], vec!["--hosts", &list, "-H", "x"], vec!["--hosts", &list, "-U", "x"]] {
+        assert_eq!(dump("hosts", &bad, None).status.code(), Some(2), "{bad:?}");
+    }
+    let open = write("open.toml", &entry("one", "10.0.0.1"), 0o644);
+    assert_eq!(dump("hosts", &["--hosts", &open], None).status.code(), Some(2));
+    write("pw", "s3cret\n", 0o644);
+    assert_eq!(dump("hosts", &["--hosts", &list], None).status.code(), Some(2));
+    let _ = std::fs::remove_dir_all(&dir);
 }

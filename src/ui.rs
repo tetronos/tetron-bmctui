@@ -95,27 +95,49 @@ fn nav_title(item: NavItem) -> &'static str {
     }
 }
 
-/// Top row: the host tab. The host list will add more tabs here.
-fn host_bar(app: &mut App, c: &mut Canvas) {
-    let mut x = 0;
-    if app.width < MEDIUM {
-        // Focusing the navigation pane is what opens the overlay.
-        x = button(app, c, 0, 0, "[menu]", Hit::Pane(Pane::Nav), Kind::Head);
-    }
-    let state = match app.session_ok {
+/// Text of one host tab. Only a visited host has a known state.
+fn host_tab(app: &App, i: usize) -> String {
+    let state = match app.states[i].session_ok {
         Some(true) => "ok",
         Some(false) => "error",
         None => "unknown",
     };
-    let tab = format!(" [1 {} {state}] ", app.t.label());
-    c.text(x, 0, c.w, &tab, Kind::Head);
+    // Only the first nine hosts have a number key.
+    let key = if i < 9 { format!("{} ", i + 1) } else { String::new() };
+    format!("[{key}{} {state}]", app.hosts[i].label())
+}
+
+/// Top row: one clickable tab per host. When they do not all fit, the row
+/// starts late enough that the tab of the host in use is visible.
+fn host_bar(app: &mut App, c: &mut Canvas) {
+    let mut x = 0;
+    if app.width < MEDIUM {
+        // Focusing the navigation pane is what opens the overlay.
+        x = button(app, c, 0, 0, "[menu]", Hit::Pane(Pane::Nav), Kind::Head) + 1;
+    }
+    let tabs: Vec<String> = (0..app.hosts.len()).map(|i| host_tab(app, i)).collect();
+    // Width needed to show the tabs from `first` up to the current one.
+    let need = |first: usize| tabs[first..=app.current].iter().map(|t| t.len() + 1).sum::<usize>();
+    let mut first = 0;
+    while first < app.current && x + need(first) > c.w {
+        first += 1;
+    }
+    for (i, tab) in tabs.iter().enumerate().skip(first) {
+        let kind = if i == app.current { Kind::Head } else { Kind::Dim };
+        // The current tab is cut off rather than left out on a tiny screen.
+        let label = if i == app.current { &tab[..tab.len().min(c.w.saturating_sub(x))] } else { tab.as_str() };
+        if label.is_empty() || x + label.len() > c.w {
+            break;
+        }
+        x = button(app, c, x, 0, label, Hit::Host(i), kind) + 1;
+    }
     let vendor = match app.vendor {
         Some(ipmi::SUPERMICRO_ID) => "Supermicro".to_string(),
         Some(id) => format!("vendor {id}"),
         None => "vendor ?".into(),
     };
     let right = c.w.saturating_sub(vendor.len() + 1);
-    if right > x + tab.len() {
+    if right > x {
         c.text(right, 0, vendor.len(), &vendor, Kind::Dim);
     }
 }
@@ -219,13 +241,13 @@ fn dialog(app: &mut App, c: &mut Canvas) {
         Mode::Normal => return,
         Mode::Unlock { anchor } => (
             "Unlock",
-            vec![format!("Unlock writes on {}?", app.t.label()), "Power, fan, event log and console input become possible.".to_string()],
+            vec![format!("Unlock writes on {}?", app.t.describe()), "Power, fan, event log and console input become possible.".to_string()],
             "[ Unlock (y) ]",
             *anchor,
         ),
         Mode::Confirm { act, anchor } => (
             "Confirm",
-            vec![format!("Run on {}:", app.t.label()), act.label.clone(), format!("ipmitool {}", act.args.join(" "))],
+            vec![format!("Run on {}:", app.t.describe()), act.label.clone(), format!("ipmitool {}", act.args.join(" "))],
             "[ Run (y) ]",
             *anchor,
         ),

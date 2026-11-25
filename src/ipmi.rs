@@ -13,6 +13,8 @@ pub const SUPERMICRO_ID: u32 = 10876;
 #[derive(Clone, Debug)]
 pub struct Target {
     pub bin: String,
+    /// Name from the host list. `None` for a host given on the command line.
+    pub name: Option<String>,
     pub host: Option<String>,
     pub user: Option<String>,
     pub iface: String,
@@ -27,10 +29,11 @@ pub enum Screen {
     Fru,
     Control,
     Fan,
+    /// The host list. It is local: nothing is fetched for it.
+    Hosts,
 }
 
 impl Screen {
-
     pub fn title(self) -> &'static str {
         match self {
             Screen::Dash => "Overview",
@@ -39,6 +42,7 @@ impl Screen {
             Screen::Fru => "Inventory",
             Screen::Control => "Power",
             Screen::Fan => "Fans",
+            Screen::Hosts => "Hosts",
         }
     }
 
@@ -49,6 +53,7 @@ impl Screen {
             "sel" | "events" => Some(Screen::Sel),
             "fru" => Some(Screen::Fru),
             "control" | "power" => Some(Screen::Control),
+            "hosts" => Some(Screen::Hosts),
             "fan" => Some(Screen::Fan),
             _ => None,
         }
@@ -104,8 +109,18 @@ pub fn fan_name(b: u8) -> &'static str {
 }
 
 impl Target {
+    /// Short name for the host bar, status line and audit log.
     pub fn label(&self) -> String {
-        self.host.clone().unwrap_or_else(|| "local".into())
+        self.name.clone().or_else(|| self.host.clone()).unwrap_or_else(|| "local".into())
+    }
+
+    /// Name and address together, for dialogs and the audit log: a list name
+    /// alone does not prove which machine is meant.
+    pub fn describe(&self) -> String {
+        match (&self.name, &self.host) {
+            (Some(n), Some(h)) => format!("{n} ({h})"),
+            _ => self.label(),
+        }
     }
 
     /// Full argument list. The password never appears here: `-E` makes
@@ -186,6 +201,7 @@ pub fn fetch(t: &Target, s: Screen) -> Result<String, String> {
         Screen::Fru => r(&["fru", "print"]),
         Screen::Control => r(&["chassis", "power", "status"]),
         Screen::Fan => r(&["raw", "0x30", "0x45", "0x00"]),
+        Screen::Hosts => Ok(String::new()),
     }
 }
 
@@ -284,7 +300,7 @@ mod tests {
 
     #[test]
     fn password_never_in_argv() {
-        let t = Target { bin: "ipmitool".into(), host: Some("h".into()), user: Some("ADMIN".into()), iface: "lanplus".into(), pass_file: None };
+        let t = Target { bin: "ipmitool".into(), name: None, host: Some("h".into()), user: Some("ADMIN".into()), iface: "lanplus".into(), pass_file: None };
         let a = t.cli_args(&["chassis".into(), "status".into()]);
         assert!(a.contains(&"-E".to_string()));
         assert!(!a.iter().any(|x| x == "-P"));
@@ -296,7 +312,7 @@ mod tests {
 
     #[test]
     fn local_has_no_lan_args() {
-        let t = Target { bin: "ipmitool".into(), host: None, user: None, iface: "lanplus".into(), pass_file: None };
+        let t = Target { bin: "ipmitool".into(), name: None, host: None, user: None, iface: "lanplus".into(), pass_file: None };
         assert_eq!(t.cli_args(&["mc".into(), "info".into()]), vec!["mc", "info"]);
     }
 

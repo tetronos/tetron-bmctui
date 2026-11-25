@@ -20,6 +20,9 @@ pub struct Ctx<'a> {
     pub vendor: Option<u32>,
     pub cursor: usize,
     pub loading: bool,
+    /// All configured hosts and the one in use, for the Hosts screen.
+    pub hosts: &'a [ipmi::Target],
+    pub current: usize,
 }
 
 /// On screens with a menu (Power, Fans) the first action is on this line. Line
@@ -80,7 +83,23 @@ pub fn details(s: Screen, c: &Ctx, width: usize) -> Vec<Line> {
     // Unwrapped (text, style) pairs are collected first and wrapped at the end.
     let mut v: Vec<Line> = vec![];
     let items = actions(s, c.vendor);
-    if let Some(a) = items.get(c.cursor) {
+    if s == Screen::Hosts {
+        // Row 0 is the table header, so host N is on row N + 1.
+        if let Some(h) = c.cursor.checked_sub(1).and_then(|i| c.hosts.get(i)) {
+            v.push((h.label(), Kind::Head));
+            v.push((String::new(), Kind::Normal));
+            let pass = h.pass_file.clone().unwrap_or_else(|| "IPMI_PASSWORD".into());
+            for (name, value) in [
+                ("address", h.host.clone().unwrap_or_else(|| "in-band (/dev/ipmi0)".into())),
+                ("user", h.user.clone().unwrap_or_else(|| "(none)".into())),
+                ("interface", h.iface.clone()),
+                ("password from", pass),
+            ] {
+                v.push((name.into(), Kind::Dim));
+                v.push((value, Kind::Normal));
+            }
+        }
+    } else if let Some(a) = items.get(c.cursor) {
         v.push((a.label.clone(), Kind::Head));
         v.push((String::new(), Kind::Normal));
         v.push((format!("ipmitool {}", a.args.join(" ")), Kind::Dim));
@@ -188,7 +207,23 @@ fn dash_kind(l: &str) -> Kind {
     }
 }
 
+/// The host table. The host in use is marked with `*`.
+fn hosts_screen(c: &Ctx) -> Vec<Line> {
+    let mut v = vec![(format!("  {:<16} {:<24} {}", "NAME", "ADDRESS", "USER"), Kind::Head)];
+    for (i, h) in c.hosts.iter().enumerate() {
+        let mark = if i == c.current { "*" } else { " " };
+        let line = format!("{mark} {:<16} {:<24} {}", h.label(), h.host.as_deref().unwrap_or("in-band"), h.user.as_deref().unwrap_or(""));
+        v.push((line, Kind::Normal));
+    }
+    v.push((String::new(), Kind::Normal));
+    v.push(("Enter or click selects a host. Switching locks writes.".into(), Kind::Dim));
+    v
+}
+
 pub fn render(s: Screen, c: &Ctx) -> Vec<Line> {
+    if s == Screen::Hosts {
+        return hosts_screen(c);
+    }
     if s == Screen::Fan {
         match c.vendor {
             None => return vec![("BMC vendor not known yet (r asks again).".into(), Kind::Dim)],
@@ -254,6 +289,7 @@ pub fn render(s: Screen, c: &Ctx) -> Vec<Line> {
             .collect(),
         // Handled above.
         Screen::Control | Screen::Fan => menu_screen(s, c),
+        Screen::Hosts => hosts_screen(c),
     }
 }
 
@@ -272,11 +308,11 @@ mod tests {
     #[test]
     fn fan_gate_for_other_vendor() {
         let d: Result<String, String> = Ok(" 01".into());
-        let c = Ctx { data: Some(&d), vendor: Some(674), cursor: 0, loading: false };
+        let c = Ctx { data: Some(&d), vendor: Some(674), cursor: 0, loading: false, hosts: &[], current: 0 };
         let v = render(Screen::Fan, &c);
         assert!(v[0].0.contains("not available"));
         assert!(actions(Screen::Fan, c.vendor).is_empty());
-        let c2 = Ctx { data: Some(&d), vendor: Some(ipmi::SUPERMICRO_ID), cursor: 1, loading: false };
+        let c2 = Ctx { data: Some(&d), vendor: Some(ipmi::SUPERMICRO_ID), cursor: 1, loading: false, hosts: &[], current: 0 };
         let v2 = render(Screen::Fan, &c2);
         assert!(v2[0].0.contains("Full speed"));
     }
@@ -284,7 +320,7 @@ mod tests {
     #[test]
     fn menu_stays_in_place_after_an_error() {
         let d: Result<String, String> = Err("boom".into());
-        let c = Ctx { data: Some(&d), vendor: None, cursor: 0, loading: false };
+        let c = Ctx { data: Some(&d), vendor: None, cursor: 0, loading: false, hosts: &[], current: 0 };
         let v = render(Screen::Control, &c);
         assert!(v[MENU_FIRST_LINE].0.contains("Power on"));
         assert!(v.iter().any(|l| l.0 == "error: boom"));
@@ -301,7 +337,7 @@ mod tests {
     #[test]
     fn error_lines() {
         let d: Result<String, String> = Err("boom".into());
-        let c = Ctx { data: Some(&d), vendor: None, cursor: 0, loading: false };
+        let c = Ctx { data: Some(&d), vendor: None, cursor: 0, loading: false, hosts: &[], current: 0 };
         assert_eq!(render(Screen::Sensors, &c)[0], ("error: boom".to_string(), Kind::Bad));
     }
 }
