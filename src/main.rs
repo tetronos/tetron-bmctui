@@ -42,7 +42,7 @@ usage: tetron-bmctui [-H host] [-U user] [-I iface] [--pass-file FILE]
   --select NAME     start with this host of the list
   --ipmitool BIN    ipmitool binary (default: ipmitool)
   --relock MINUTES  lock writes again after this idle time (default 15, 0 never)
-  --console-size CxR  emulated console size (default 80x24)
+  --console-size CxR  emulated console size (default 100x31)
   --scrollback N    console lines kept (default 50000, max 200000)
   --prefix CHAR     console command key is Ctrl-CHAR (default ])
   --efi-boot        ask for UEFI with the \"Next boot\" actions

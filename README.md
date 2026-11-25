@@ -85,9 +85,9 @@ Open the Console screen and press `Enter` or click `[ Connect ]`. Connecting nee
 | `u`, `d`, `1` to `9`, `q`, `?` | lock or unlock, details, host, quit, list commands |
 | `Ctrl-]` | send `Ctrl-]` to the host |
 
-The mouse wheel scrolls back at any time. Mouse events are not sent to the host. The screen is emulated at 80x24, and a smaller pane shows the part around the cursor. `--console-size`, `--scrollback` (default 50000 lines) and `--prefix` change this. `ipmitool` keeps its own escape: `Enter`, `~`, `.` also ends the session.
+The mouse wheel scrolls back at any time. Mouse events are not sent to the host. The screen is emulated at 100x31, which AMI BIOS setup commonly draws over serial; 80x24 output fits inside it. A smaller pane shows the part around the cursor and is marked as cropped, so make the terminal larger or zoom (a terminal of at least 100x31 shows all of it zoomed). Serial over LAN does not replay earlier output: after connecting, the screen stays blank until the host prints, so press an arrow key in a quiet BIOS menu. `--console-size`, `--scrollback` (default 50000 lines) and `--prefix` change this. `ipmitool` keeps its own escape: `Enter`, `~`, `.` also ends the session.
 
-If another session holds the console, `t` offers to end it, after unlock and confirmation. Not built yet: console log, search, copy, reconnect and an on-screen panel for function keys. This is tested only against the fake `ipmitool`, not yet on a real BMC.
+If another session holds the console, `t` offers to end it, after unlock and confirmation. Not built yet: console log, search, copy, reconnect and an on-screen panel for function keys. On real hardware it has been tried on one Supermicro H12 board.
 
 ## Events, export and next boot
 

@@ -19,6 +19,8 @@ pub const MEDIUM: usize = 97;
 /// future console) fits at 97 columns, and with details at 120.
 const NAV_W: usize = 14;
 const DETAILS_W: usize = 22;
+/// Columns taken by the navigation, the details pane and their borders.
+pub const SIDE_PANES: usize = NAV_W + DETAILS_W + 4;
 const MIN_W: usize = 40;
 const MIN_H: usize = 12;
 
@@ -228,7 +230,12 @@ fn console_state(app: &App) -> String {
 }
 
 fn draw_console(app: &mut App, c: &mut Canvas, r: Rect) {
-    let title = format!("Console: {}", console_state(app));
+    let mut title = format!("Console: {}", console_state(app));
+    let a = inner(r);
+    let s = app.console_settings;
+    if app.console.is_some() && (a.w < usize::from(s.cols.get()) || a.h < usize::from(s.rows.get())) {
+        title = format!("{title}, cropped ({} z zooms)", app.prefix_name());
+    }
     pane(app, c, r, Pane::Main, &title);
     draw_console_cells(app, c, inner(r));
 }

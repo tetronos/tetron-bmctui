@@ -40,9 +40,12 @@ pub struct Settings {
 }
 
 impl Default for Settings {
-    /// 80x24 is what BIOS console redirection expects.
+    /// 100x31: AMI BIOS setup often draws this size over serial, and 80x24
+    /// output fits inside it. A smaller emulator cuts the larger screen off.
     fn default() -> Settings {
-        Settings { cols: vt100::Parser::DEFAULT_COLS, rows: vt100::Parser::DEFAULT_ROWS, scrollback: 50_000 }
+        const COLS: NonZeroU16 = NonZeroU16::new(100).unwrap();
+        const ROWS: NonZeroU16 = NonZeroU16::new(31).unwrap();
+        Settings { cols: COLS, rows: ROWS, scrollback: 50_000 }
     }
 }
 
@@ -172,6 +175,14 @@ impl Console {
 
     pub fn live(&self) -> bool {
         !self.flags.ended.load(Ordering::SeqCst)
+    }
+
+    /// Collect the exit status of an ipmitool that ended by itself, so that no
+    /// defunct process stays until the session is closed.
+    pub fn reap(&mut self) {
+        if let Some(c) = &mut self.child {
+            let _ = c.try_wait();
+        }
     }
 
     /// True once after new output.

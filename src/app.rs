@@ -296,7 +296,10 @@ impl App {
         let mut changed = false;
         // New console output needs a redraw. The idle relock below does not
         // touch the console: once connected, typing has no further gate.
-        if let Some(c) = &self.console {
+        if let Some(c) = &mut self.console {
+            if !c.live() {
+                c.reap();
+            }
             changed |= c.take_dirty();
             let live = c.live();
             if self.was_live && !live {
@@ -404,7 +407,7 @@ impl App {
                 self.console = Some(c);
                 self.was_live = true;
                 self.focus = Pane::Main;
-                self.status = format!("console connected. Keys go to the host. {} then ? lists commands.", self.prefix_name());
+                self.status = format!("connected. Only new output shows: if blank, press an arrow key. {} then ? for commands.", self.prefix_name());
             }
             Err(e) => self.status = format!("console: {e}"),
         }
@@ -688,7 +691,14 @@ impl App {
 
     /// Details are shown by default only on wide terminals.
     pub fn details_visible(&self) -> bool {
-        self.details.unwrap_or(self.width >= crate::ui::WIDE)
+        // On the console they are only shown by default when the emulated
+        // screen still fits beside them.
+        let wide = if self.screen == Screen::Console {
+            usize::from(self.console_settings.cols.get()) + crate::ui::SIDE_PANES
+        } else {
+            crate::ui::WIDE
+        };
+        self.details.unwrap_or(self.width >= wide)
     }
 
     /// Panes that Tab visits. On a narrow terminal the navigation is an overlay
@@ -1300,7 +1310,7 @@ mod tests {
         ctrl(&mut a, '5');
         press(&mut a, KeyCode::Char('['));
         press(&mut a, KeyCode::Home);
-        assert_eq!(a.console.as_ref().unwrap().scrolled(), 77);
+        assert_eq!(a.console.as_ref().unwrap().scrolled(), 70);
         let c = ui::draw(&mut a, 120, 28);
         assert!(c.row(2).contains("line 0"), "{}", c.row(2));
         press(&mut a, KeyCode::Char('x'));
@@ -1330,6 +1340,20 @@ mod tests {
         assert!(a.want_connect);
         a.switch_host(1);
         assert!(!a.want_connect && !a.unlocked);
+    }
+
+    #[test]
+    fn console_details_do_not_crop_by_default() {
+        let mut a = app(120, 28);
+        assert!(a.details_visible());
+        a.switch(Screen::Console);
+        assert!(!a.details_visible());
+        ui::draw(&mut a, 140, 36);
+        assert!(a.details_visible());
+        let _rx = with_console(&mut a, b"");
+        assert!(ui::draw(&mut a, 120, 36).row(1).contains("typing to host"));
+        assert!(ui::draw(&mut a, 120, 36).row(1).find("cropped").is_none());
+        assert!(ui::draw(&mut a, 100, 24).row(1).contains("cropped"));
     }
 
     #[test]
