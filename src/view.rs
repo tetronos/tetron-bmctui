@@ -11,6 +11,8 @@ pub enum Kind {
     Bad,
     Dim,
     Sel,
+    /// A console cell with the colors and attributes the host asked for.
+    Term(crate::canvas::TermStyle),
 }
 
 pub type Line = (String, Kind);

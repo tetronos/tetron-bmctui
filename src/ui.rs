@@ -8,7 +8,7 @@
 //!   below 97              one pane; navigation opens as an overlay
 
 use crate::app::{App, Hit, Mode, NAV, Pane, Then};
-use crate::canvas::{Canvas, Rect};
+use crate::canvas::{Canvas, Rect, TermStyle};
 use crate::ipmi::{self, Screen};
 use crate::view::{self, Kind, wrap};
 use crossterm::event::KeyCode;
@@ -183,7 +183,7 @@ fn draw_console_cells(app: &mut App, c: &mut Canvas, a: Rect) {
         }
         return;
     };
-    let typing = app.typing();
+    let (typing, mono) = (app.typing(), app.console_mono);
     let parser = console.screen();
     let screen = parser.screen();
     let (rows, cols) = screen.size();
@@ -201,18 +201,16 @@ fn draw_console_cells(app: &mut App, c: &mut Canvas, a: Rect) {
             if cell.is_wide_continuation() {
                 ch = ' ';
             }
-            let mut kind = if cell.inverse() {
-                Kind::Sel
-            } else if cell.bold() {
-                Kind::Head
-            } else {
-                Kind::Normal
-            };
+            let mut style = TermStyle::of(cell);
+            if mono {
+                style.fg = Default::default();
+                style.bg = Default::default();
+            }
             // The cursor is drawn only where typing would go.
             if typing && screen.scrollback() == 0 && !screen.hide_cursor() && (top + y, left + x) == (cur_row, cur_col) {
-                kind = if kind == Kind::Sel { Kind::Normal } else { Kind::Sel };
+                style.inverse = !style.inverse;
             }
-            c.term_cell(a.x + x, a.y + y, ch, kind);
+            c.term_cell(a.x + x, a.y + y, ch, Kind::Term(style));
         }
     }
 }

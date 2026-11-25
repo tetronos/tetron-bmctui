@@ -158,6 +158,8 @@ pub struct App {
     /// Sessions to be ended by the main loop, which does not block on them.
     pub closing: Vec<Console>,
     pub console_settings: console::Settings,
+    /// Show the console without the colors of the host.
+    pub console_mono: bool,
     /// Byte of the console command key.
     pub prefix: u8,
     /// The prefix was pressed: the next key is a console command.
@@ -223,6 +225,7 @@ impl App {
             want_connect: false,
             closing: vec![],
             console_settings: console::Settings::default(),
+            console_mono: false,
             prefix: DEFAULT_PREFIX,
             prefix_pending: false,
             scroll_mode: false,

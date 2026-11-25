@@ -54,6 +54,60 @@ pub fn safe_term_char(c: char) -> char {
     }
 }
 
+/// Look of a console cell. Only these parsed values come from the host. The
+/// escape sequence for them is built here.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct TermStyle {
+    pub fg: vt100::Color,
+    pub bg: vt100::Color,
+    pub bold: bool,
+    pub dim: bool,
+    pub italic: bool,
+    pub underline: bool,
+    pub inverse: bool,
+}
+
+impl TermStyle {
+    pub fn of(c: &vt100::Cell) -> TermStyle {
+        TermStyle {
+            fg: c.fgcolor(),
+            bg: c.bgcolor(),
+            bold: c.bold(),
+            dim: c.dim(),
+            italic: c.italic(),
+            underline: c.underline(),
+            inverse: c.inverse(),
+        }
+    }
+}
+
+/// The SGR parameter for a color. `base` is 30 for text and 40 for background.
+/// The first 16 colors use the classic codes: terminals can treat them
+/// differently from the 256 color form, for example by showing bold text in
+/// the bright color, and BIOS screens rely on that.
+fn color_code(c: vt100::Color, base: u8) -> Option<String> {
+    match c {
+        vt100::Color::Default => None,
+        vt100::Color::Idx(i @ 0..=7) => Some((base + i).to_string()),
+        vt100::Color::Idx(i @ 8..=15) => Some((base + 60 + i - 8).to_string()),
+        vt100::Color::Idx(i) => Some(format!("{};5;{i}", base + 8)),
+        vt100::Color::Rgb(r, g, b) => Some(format!("{};2;{r};{g};{b}", base + 8)),
+    }
+}
+
+/// The whole escape sequence for a style, starting from a reset.
+fn sgr(s: TermStyle) -> String {
+    let mut codes = vec!["0".to_string()];
+    for (on, code) in [(s.bold, "1"), (s.dim, "2"), (s.italic, "3"), (s.underline, "4"), (s.inverse, "7")] {
+        if on {
+            codes.push(code.into());
+        }
+    }
+    codes.extend(color_code(s.fg, 30));
+    codes.extend(color_code(s.bg, 40));
+    format!("\x1b[{}m", codes.join(";"))
+}
+
 pub struct Canvas {
     pub w: usize,
     pub h: usize,
@@ -135,6 +189,7 @@ impl Canvas {
                     Kind::Bad => queue!(out, SetForegroundColor(Color::Red))?,
                     Kind::Dim => queue!(out, SetAttribute(Attribute::Dim))?,
                     Kind::Sel => queue!(out, SetAttribute(Attribute::Reverse))?,
+                    Kind::Term(s) => queue!(out, Print(sgr(s)))?,
                 }
                 // Attribute::Reset also restores the default colors.
                 queue!(out, Print(s), SetAttribute(Attribute::Reset))?;
@@ -153,6 +208,30 @@ mod tests {
         let mut c = Canvas::new(20, 1);
         c.text(0, 0, 20, "a\x1b[2Jb\u{9b}c\r\n", Kind::Normal);
         assert_eq!(c.row(0).trim_end(), "a?[2Jb?c??");
+    }
+
+    #[test]
+    fn console_colors_use_classic_codes() {
+        use vt100::Color::{Idx, Rgb};
+        assert_eq!(sgr(TermStyle::default()), "\x1b[0m");
+        let s = TermStyle { fg: Idx(3), bg: Idx(4), bold: true, ..Default::default() };
+        assert_eq!(sgr(s), "\x1b[0;1;33;44m");
+        let s = TermStyle { fg: Idx(15), bg: Idx(200), inverse: true, ..Default::default() };
+        assert_eq!(sgr(s), "\x1b[0;7;97;48;5;200m");
+        assert_eq!(sgr(TermStyle { fg: Rgb(1, 2, 3), ..Default::default() }), "\x1b[0;38;2;1;2;3m");
+    }
+
+    /// Colors survive the whole way: host bytes, emulator, buffer, terminal.
+    #[test]
+    fn host_colors_reach_the_output() {
+        let mut p = vt100::Parser::new(vt100::Parser::DEFAULT_ROWS, vt100::Parser::DEFAULT_COLS, 0);
+        p.process(b"\x1b[1;37;44mMain\x1b[0m");
+        let cell = p.screen().cell(0, 0).unwrap();
+        let mut c = Canvas::new(1, 1);
+        c.term_cell(0, 0, 'M', Kind::Term(TermStyle::of(cell)));
+        let mut out = vec![];
+        c.flush(&mut out).unwrap();
+        assert!(String::from_utf8_lossy(&out).contains("\x1b[0;1;37;44mM"));
     }
 
     #[test]
