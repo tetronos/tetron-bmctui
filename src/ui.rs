@@ -172,7 +172,8 @@ fn draw_console_cells(app: &mut App, c: &mut Canvas, a: Rect) {
             c.text(a.x + 1, a.y + i, a.w.saturating_sub(2), line, Kind::Normal);
         }
         if a.h > hint.len() + 1 {
-            button(app, c, a.x + 1, a.y + hint.len() + 1, "[ Connect ]", Hit::Connect, Kind::Head);
+            let kind = connect_kind(app);
+            button(app, c, a.x + 1, a.y + hint.len() + 1, "[ Connect (Enter) ]", Hit::Connect, kind);
         }
         return;
     };
@@ -208,6 +209,12 @@ fn draw_console_cells(app: &mut App, c: &mut Canvas, a: Rect) {
             c.term_cell(a.x + x, a.y + y, ch, kind);
         }
     }
+}
+
+/// The connect button is highlighted while Enter would press it: in every pane
+/// but the navigation.
+fn connect_kind(app: &App) -> Kind {
+    if app.focus == Pane::Nav { Kind::Head } else { Kind::Sel }
 }
 
 /// Short state of the console, for pane titles and the status line.
@@ -283,7 +290,7 @@ fn draw_console_details(app: &mut App, c: &mut Canvas, r: Rect) {
         buttons.push(("[ Zoom ]", Hit::Command('z')));
         buttons.push(("[ Scroll back ]", Hit::Command('[')));
     } else {
-        buttons.push(("[ Connect ]", Hit::Connect));
+        buttons.push(("[ Connect (Enter) ]", Hit::Connect));
         if app.console.as_ref().is_some_and(|c| c.busy_elsewhere()) {
             buttons.push(("[ Take over ]", Hit::Key(KeyCode::Char('t'))));
         }
@@ -293,7 +300,8 @@ fn draw_console_details(app: &mut App, c: &mut Canvas, r: Rect) {
     }
     let first = a.h.saturating_sub(buttons.len());
     for (i, (label, hit)) in buttons.into_iter().enumerate().take(a.h) {
-        button(app, c, a.x + 1, a.y + first + i, label, hit, Kind::Head);
+        let kind = if hit == Hit::Connect { connect_kind(app) } else { Kind::Head };
+        button(app, c, a.x + 1, a.y + first + i, label, hit, kind);
     }
 }
 

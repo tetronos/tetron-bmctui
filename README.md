@@ -74,7 +74,7 @@ Below 97 columns one pane is shown, and the navigation opens from `[menu]` or wi
 
 ## Console
 
-Open the Console screen and press `Enter` or click `[ Connect ]`. Connecting needs unlock. After that, all keys go to the host while the console pane has the focus, with no further prompt. Click another pane, or use the command key `Ctrl-]` followed by:
+Open the Console screen and press `Enter` or click `[ Connect (Enter) ]`. Connecting needs unlock. After that, all keys go to the host while the console pane has the focus, with no further prompt. Click another pane, or use the command key `Ctrl-]` followed by:
 
 | Key | Function |
 |---|---|

@@ -1239,6 +1239,18 @@ mod tests {
     }
 
     #[test]
+    fn connect_by_keyboard_only() {
+        let mut a = app(120, 28);
+        press(&mut a, KeyCode::BackTab);
+        press(&mut a, KeyCode::Up);
+        press(&mut a, KeyCode::Enter); // open the Console screen
+        assert_eq!((a.screen, a.focus), (Screen::Console, Pane::Main));
+        press(&mut a, KeyCode::Enter);
+        press(&mut a, KeyCode::Char('y'));
+        assert!(a.want_connect);
+    }
+
+    #[test]
     fn typed_keys_go_to_the_host() {
         let mut a = app(120, 28);
         let rx = with_console(&mut a, b"");
