@@ -8,12 +8,14 @@ Terminal UI for server BMCs (IPMI now, Redfish planned). Part of the tetron suit
 
 - Screens: Overview, Sensors, Events, Inventory (FRU), Power (power control, identify LED, clear event log, BMC cold reset) and Fans (Supermicro fan mode).
 - Host list: several BMCs in one run, picked from the top bar or the Hosts screen.
+- Filter on Sensors, Events and Inventory, a help window, and export of a screen to a text file.
+- One-time boot device (PXE, disk, CD/DVD, BIOS setup) on the Power screen.
 - Mouse and keyboard control. Panes adapt to the terminal width.
 - Serial console in a pane with scrollback and zoom, through `ipmitool sol activate`. `S` runs it full screen instead.
 
 Fan control uses Supermicro OEM raw commands. Boards differ, so check the mode and the fan speeds after a change. It is not available for other vendors yet.
 
-Not built yet: Redfish, filter, help screen and export.
+Not built yet: Redfish and virtual media.
 
 ## Requirements
 
@@ -61,6 +63,9 @@ Click screens, rows, buttons and key hints. The wheel scrolls the pane under the
 | `Enter` | open a screen or run the selected action |
 | `u` | unlock or lock writes |
 | `d` | show or hide details |
+| `/` | filter lines, `Enter` keeps it, `Esc` clears it |
+| `e` | export the screen, as filtered |
+| `?` | help |
 | `r` | refresh |
 | `S` | serial console, full screen (needs unlock) |
 | `q` | quit |
@@ -84,10 +89,18 @@ The mouse wheel scrolls back at any time. Mouse events are not sent to the host.
 
 If another session holds the console, `t` offers to end it, after unlock and confirmation. Not built yet: console log, search, copy, reconnect and an on-screen panel for function keys. This is tested only against the fake `ipmitool`, not yet on a real BMC.
 
+## Events, export and next boot
+
+Exports are new files with mode 0600 in `~/.local/state/tetron-bmctui/exports/`, or in `--export-dir`. They can contain serial numbers and addresses.
+
+In the event log, data of an OEM record is also shown as text when it is readable UTF-16. Records that `ipmitool` can not name stay unnamed, and the details pane says so.
+
+The "Next boot" actions run `ipmitool chassis bootdev`, which applies to one boot. `--efi-boot` adds `options=efiboot`. Boards differ in how they treat this, and it is not yet tested on hardware.
+
 ## Safety
 
 - The program starts read-only. Unlocking asks once and names the host.
-- After unlock, power on, identify LED and fan modes run at once. Soft shutdown, power off, cycle, reset, BMC cold reset and clearing the event log also ask for confirmation. `Enter` alone does not confirm.
+- After unlock, power on, identify LED and fan modes run at once. Soft shutdown, power off, cycle, reset, BMC cold reset, clearing the event log and the next boot actions also ask for confirmation. `Enter` alone does not confirm.
 - Writes lock again after 15 idle minutes. `--relock MINUTES` changes this and `0` turns it off. **A connected console is not locked by this:** anyone at your terminal can keep typing into the host until you disconnect.
 - Actions and serial console sessions are recorded in `~/.local/state/tetron-bmctui/audit.log`. An action is refused if the record can not be written. Console keystrokes are not recorded.
 - Automatic refresh stops after an apparent login or connection failure, because repeated wrong passwords can lock a BMC account.

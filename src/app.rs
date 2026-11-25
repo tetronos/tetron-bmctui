@@ -74,6 +74,8 @@ pub enum Mode {
     Normal,
     /// "Unlock writes on HOST?" With `connect` the console is opened next.
     Unlock { anchor: Option<(usize, usize)>, connect: bool },
+    /// The list of keys.
+    Help,
     /// "Run ACTION on HOST?" for sensitive actions.
     Confirm { act: Action, anchor: Option<(usize, usize)> },
 }
@@ -89,10 +91,12 @@ pub enum Msg {
 }
 
 /// What is remembered about a host while another one is in use.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Default)]
 pub struct HostState {
     /// Result of the latest fetch: `None` until the first one returns.
     pub session_ok: Option<bool>,
+    /// Local time of that result. A tab of another host shows how old it is.
+    pub checked: Option<String>,
     /// Auto refresh is stopped after a login failure. This is per host, so that
     /// switching away and back does not start retrying a wrong password.
     halt_auto: bool,
@@ -145,6 +149,14 @@ pub struct App {
     /// The console takes the whole terminal.
     pub zoom: bool,
     was_live: bool,
+    /// Text that lines of the open screen must contain. Empty shows all.
+    pub filter: String,
+    /// The filter is being typed.
+    pub filtering: bool,
+    pub help_scroll: usize,
+    /// The main loop writes the open screen to a file when set.
+    pub want_export: bool,
+    pub efi_boot: bool,
     pub quit: bool,
     /// Confirmed or harmless actions waiting to be run by the main loop.
     pub queue: Vec<Action>,
@@ -196,6 +208,11 @@ impl App {
             scroll_mode: false,
             zoom: false,
             was_live: false,
+            filter: String::new(),
+            filtering: false,
+            help_scroll: 0,
+            want_export: false,
+            efi_boot: false,
             quit: false,
             queue: vec![],
             hits: vec![],
@@ -241,6 +258,7 @@ impl App {
             Msg::Data(_, s, r) => {
                 self.loading.remove(&s);
                 self.states[self.current].session_ok = Some(r.is_ok());
+                self.states[self.current].checked = Some(crate::export::clock());
                 if let Err(e) = &r
                     && ipmi::looks_like_auth_error(e)
                 {
@@ -345,6 +363,8 @@ impl App {
         } else {
             self.status = format!("host {}: auto refresh is stopped after a failure. r retries once.", self.t.describe());
         }
+        self.filter.clear();
+        self.filtering = false;
         // The host screen stays as it is. Other screens are fetched again.
         if self.screen != Screen::Hosts {
             self.switch(self.screen);
@@ -463,7 +483,7 @@ impl App {
             'q' => self.quit = true,
             'u' => self.toggle_lock(),
             'd' => self.toggle_details(),
-            '?' => self.status = format!("after {}: . disconnect, z zoom, [ scroll, Tab pane, u lock, d details, 1-9 host, q quit; twice sends it", self.prefix_name()),
+            '?' => self.open_help(),
             '1'..='9' => self.switch_host(c as usize - '1' as usize),
             _ => self.status = format!("no console command {c:?}. {} then ? lists them.", self.prefix_name()),
         }
@@ -525,27 +545,96 @@ impl App {
 
     // ----- screen content ---------------------------------------------------
 
-    fn ctx(&self) -> view::Ctx<'_> {
-        view::Ctx {
-            data: self.data.get(&self.screen),
+    /// Call `f` with what the view needs, the data narrowed by the filter.
+    fn with_ctx<R>(&self, f: impl FnOnce(&view::Ctx) -> R) -> R {
+        let all = self.data.get(&self.screen);
+        let narrowed = match all {
+            Some(Ok(text)) if !self.filter.is_empty() => Some(Ok(view::filter(self.screen, text, &self.filter))),
+            _ => None,
+        };
+        f(&view::Ctx {
+            data: narrowed.as_ref().or(all),
             vendor: self.vendor,
             cursor: self.cursor,
             loading: self.loading.contains(&self.screen),
             hosts: &self.hosts,
             current: self.current,
-        }
+            efi_boot: self.efi_boot,
+        })
     }
 
     pub fn lines(&self) -> Vec<view::Line> {
-        view::render(self.screen, &self.ctx())
+        self.with_ctx(|c| view::render(self.screen, c))
     }
 
     pub fn detail_lines(&self, width: usize) -> Vec<view::Line> {
-        view::details(self.screen, &self.ctx(), width)
+        self.with_ctx(|c| view::details(self.screen, c, width))
     }
 
     pub fn menu(&self) -> Vec<Action> {
-        view::actions(self.screen, self.vendor)
+        view::actions(self.screen, self.vendor, self.efi_boot)
+    }
+
+    // ----- filter, help, export ---------------------------------------------
+
+    fn start_filter(&mut self) {
+        if view::filterable(self.screen) {
+            self.filtering = true;
+            self.focus = self.pane_cycle().into_iter().find(|p| *p == Pane::Main).unwrap_or(self.focus);
+        } else {
+            self.status = "the filter works on Sensors, Events and Inventory".into();
+        }
+    }
+
+    /// The filter changed: the old row numbers no longer mean anything.
+    fn filter_changed(&mut self) {
+        self.scroll = 0;
+        self.detail_scroll = 0;
+        self.cursor = self.first_row();
+    }
+
+    fn clear_filter(&mut self) {
+        self.filtering = false;
+        if !self.filter.is_empty() {
+            self.filter.clear();
+            self.filter_changed();
+        }
+    }
+
+    /// Keys while the filter is typed. False leaves moving and the rest to the
+    /// normal handling.
+    fn filter_key(&mut self, code: KeyCode, mods: KeyModifiers) -> bool {
+        match code {
+            KeyCode::Char(c) if !mods.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
+                if self.filter.len() < 40 {
+                    self.filter.push(c);
+                    self.filter_changed();
+                }
+            }
+            KeyCode::Backspace => {
+                self.filter.pop();
+                self.filter_changed();
+            }
+            KeyCode::Enter => self.filtering = false,
+            KeyCode::Esc => self.clear_filter(),
+            _ => return false,
+        }
+        true
+    }
+
+    fn open_help(&mut self) {
+        self.help_scroll = 0;
+        self.mode = Mode::Help;
+    }
+
+    fn export(&mut self) {
+        if self.screen == Screen::Console {
+            self.status = "the console can not be exported yet".into();
+        } else if !matches!(self.screen, Screen::Hosts) && !matches!(self.data.get(&self.screen), Some(Ok(_))) {
+            self.status = "nothing to export: no data".into();
+        } else {
+            self.want_export = true;
+        }
     }
 
     /// Line number of the selected row in the main pane.
@@ -650,6 +739,8 @@ impl App {
 
     pub fn switch(&mut self, s: Screen) {
         self.screen = s;
+        self.filter.clear();
+        self.filtering = false;
         self.scroll_mode = false;
         self.prefix_pending = false;
         self.zoom = false;
@@ -737,11 +828,16 @@ impl App {
                     self.queue.push(act);
                 }
             }
+            Mode::Help => self.mode = Mode::Help,
             Mode::Normal => {}
         }
     }
 
     fn dialog_cancel(&mut self) {
+        if matches!(self.mode, Mode::Help) {
+            self.mode = Mode::Normal;
+            return;
+        }
         self.mode = Mode::Normal;
         self.status = "cancelled, nothing was run".into();
     }
@@ -764,6 +860,15 @@ impl App {
             self.quit = true;
             return;
         }
+        if matches!(self.mode, Mode::Help) {
+            match code {
+                KeyCode::Esc | KeyCode::Enter | KeyCode::Char('?' | 'q') => self.dialog_cancel(),
+                KeyCode::Down | KeyCode::Char('j') => self.help_scroll += 1,
+                KeyCode::Up | KeyCode::Char('k') => self.help_scroll = self.help_scroll.saturating_sub(1),
+                _ => {}
+            }
+            return;
+        }
         // A dialog takes all other keys. Enter alone deliberately does nothing.
         if !matches!(self.mode, Mode::Normal) {
             match code {
@@ -773,8 +878,16 @@ impl App {
             }
             return;
         }
+        if self.filtering && self.filter_key(code, mods) {
+            return;
+        }
         let page = self.view_rows.max(2) as isize - 1;
         match code {
+            KeyCode::Char('?') => self.open_help(),
+            KeyCode::Char('/') => self.start_filter(),
+            KeyCode::Char('e') => self.export(),
+            // Esc first removes a filter that is in effect.
+            KeyCode::Esc if !self.filter.is_empty() => self.clear_filter(),
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Tab => self.cycle_focus(1),
             KeyCode::BackTab => self.cycle_focus(-1),
@@ -864,6 +977,10 @@ impl App {
             }
             return;
         }
+        // A click anywhere else ends typing the filter, and keeps it.
+        if !matches!(h, Hit::Key(_)) {
+            self.filtering = false;
+        }
         match h {
             Hit::Pane(p) => self.focus_pane(p),
             Hit::Nav(i) => self.activate_nav(i),
@@ -900,6 +1017,10 @@ impl App {
     /// The wheel scrolls the pane under the pointer, without moving the
     /// selection or the focus.
     fn wheel(&mut self, x: usize, y: usize, delta: isize) {
+        if matches!(self.mode, Mode::Help) {
+            self.help_scroll = self.help_scroll.saturating_add_signed(delta);
+            return;
+        }
         if !matches!(self.mode, Mode::Normal) {
             return;
         }
@@ -1315,6 +1436,85 @@ mod tests {
             for w in [40, 80, 120] {
                 ui::draw(&mut a, w, 28);
                 assert!(a.hits.iter().any(|(_, h)| *h == Hit::Host(i)), "host {i} at width {w}");
+            }
+        }
+    }
+
+    #[test]
+    fn filter_by_keys_and_mouse() {
+        let mut a = app(120, 28);
+        a.switch(Screen::Sensors);
+        a.data.insert(Screen::Sensors, Ok("CPU1 Temp | 01h | ok | 3.1 | 38 C\nFAN1 | 41h | ns | 7.1 | No Reading\nSystem Temp | 02h | ok | 7.1 | 30 C\n".into()));
+        ui::draw(&mut a, 120, 28);
+        click(&mut a, Hit::Key(KeyCode::Char('/')));
+        // Letters that are commands elsewhere are text here.
+        for c in "uq".chars() {
+            press(&mut a, KeyCode::Char(c));
+        }
+        assert!(!a.quit && matches!(a.mode, Mode::Normal));
+        assert_eq!(a.lines().len(), 1, "only the header is left");
+        press(&mut a, KeyCode::Backspace);
+        press(&mut a, KeyCode::Backspace);
+        for c in "temp".chars() {
+            press(&mut a, KeyCode::Char(c));
+        }
+        press(&mut a, KeyCode::Down);
+        assert_eq!((a.lines().len(), a.cursor), (3, 2));
+        assert!(a.detail_lines(30)[0].0.contains("System Temp"), "details follow the filter");
+        press(&mut a, KeyCode::Enter);
+        assert!(!a.filtering && a.filter == "temp");
+        press(&mut a, KeyCode::Esc);
+        assert_eq!(a.lines().len(), 4);
+        press(&mut a, KeyCode::Char('/'));
+        press(&mut a, KeyCode::Char('x'));
+        a.switch(Screen::Fru);
+        assert!(a.filter.is_empty() && !a.filtering);
+    }
+
+    #[test]
+    fn help_opens_and_runs_nothing() {
+        let mut a = app(120, 28);
+        open_power(&mut a);
+        unlock(&mut a);
+        click(&mut a, Hit::Key(KeyCode::Char('?')));
+        for c in ['y', 'u'] {
+            press(&mut a, KeyCode::Char(c));
+        }
+        assert!(matches!(a.mode, Mode::Help) && a.unlocked && a.queue.is_empty());
+        click(&mut a, Hit::DialogCancel);
+        assert!(matches!(a.mode, Mode::Normal));
+        for (w, h) in [(40, 12), (80, 24), (120, 28)] {
+            a.mode = Mode::Help;
+            a.help_scroll = 1000;
+            let c = ui::draw(&mut a, w, h);
+            assert!(a.hits.iter().any(|(_, k)| *k == Hit::DialogCancel));
+            assert!((0..h).any(|y| c.row(y).contains("audit log")), "the end is reachable at {w}x{h}");
+        }
+    }
+
+    #[test]
+    fn next_boot_needs_confirmation() {
+        let mut a = app(120, 28);
+        a.efi_boot = true;
+        open_power(&mut a);
+        unlock(&mut a);
+        a.cursor = a.menu().iter().position(|x| x.label.starts_with("Next boot: CD")).unwrap();
+        press(&mut a, KeyCode::Enter);
+        assert!(a.queue.is_empty());
+        press(&mut a, KeyCode::Char('y'));
+        assert_eq!(a.queue[0].args, ["chassis", "bootdev", "cdrom", "options=efiboot"]);
+    }
+
+    #[test]
+    fn key_hints_keep_help_and_quit() {
+        let mut a = app(120, 28);
+        for s in NAV {
+            a.switch(s);
+            for w in [40, 80] {
+                ui::draw(&mut a, w, 28);
+                for k in ['?', 'q'] {
+                    assert!(a.hits.iter().any(|(_, h)| *h == Hit::Key(KeyCode::Char(k))), "{k} on {s:?} at {w}");
+                }
             }
         }
     }

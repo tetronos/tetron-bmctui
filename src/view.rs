@@ -23,6 +23,25 @@ pub struct Ctx<'a> {
     /// All configured hosts and the one in use, for the Hosts screen.
     pub hosts: &'a [ipmi::Target],
     pub current: usize,
+    /// Ask for UEFI boot with the one-time boot actions.
+    pub efi_boot: bool,
+}
+
+/// Screens whose lines can be narrowed with the filter.
+pub fn filterable(s: Screen) -> bool {
+    matches!(s, Screen::Sensors | Screen::Sel | Screen::Fru)
+}
+
+/// Fetched text reduced to the lines that contain `needle`, ignoring case. The
+/// comparison uses what is shown, not hidden columns such as sensor numbers.
+pub fn filter(s: Screen, text: &str, needle: &str) -> String {
+    let needle = needle.to_lowercase();
+    let shown = |l: &str| match s {
+        Screen::Sensors => ipmi::parse_sdr(l).first().map(|x| format!("{} {} {}", x.name, x.status, x.reading)).unwrap_or_default(),
+        Screen::Sel => ipmi::decode_sel_line(l),
+        _ => l.to_string(),
+    };
+    text.lines().filter(|l| shown(l).to_lowercase().contains(&needle)).map(|l| format!("{l}\n")).collect()
 }
 
 /// On screens with a menu (Power, Fans) the first action is on this line. Line
@@ -32,9 +51,18 @@ pub const MENU_FIRST_LINE: usize = 2;
 
 /// Actions offered by a screen. The fan commands are Supermicro OEM commands,
 /// so other vendors get none until their own commands are added.
-pub fn actions(s: Screen, vendor: Option<u32>) -> Vec<Action> {
+pub fn actions(s: Screen, vendor: Option<u32>, efi_boot: bool) -> Vec<Action> {
     match s {
-        Screen::Control => ipmi::control_actions(),
+        Screen::Control => {
+            let mut v = ipmi::control_actions();
+            if efi_boot {
+                for a in v.iter_mut().filter(|a| a.args.get(1).is_some_and(|x| x == "bootdev")) {
+                    a.args.push("options=efiboot".into());
+                    a.label.push_str(", UEFI");
+                }
+            }
+            v
+        }
         Screen::Fan if vendor == Some(ipmi::SUPERMICRO_ID) => ipmi::fan_actions(),
         _ => vec![],
     }
@@ -82,7 +110,7 @@ fn sensor_status(s: &str) -> &'static str {
 pub fn details(s: Screen, c: &Ctx, width: usize) -> Vec<Line> {
     // Unwrapped (text, style) pairs are collected first and wrapped at the end.
     let mut v: Vec<Line> = vec![];
-    let items = actions(s, c.vendor);
+    let items = actions(s, c.vendor, c.efi_boot);
     if s == Screen::Hosts {
         // Row 0 is the table header, so host N is on row N + 1.
         if let Some(h) = c.cursor.checked_sub(1).and_then(|i| c.hosts.get(i)) {
@@ -122,14 +150,17 @@ pub fn details(s: Screen, c: &Ctx, width: usize) -> Vec<Line> {
             Screen::Sel => {
                 // Events are listed newest first, as in `render`.
                 if let Some(l) = text.lines().rev().nth(c.cursor) {
-                    let fields: Vec<&str> = l.split('|').map(str::trim).collect();
-                    if fields.len() >= 6 {
-                        for (name, value) in ["id", "date", "time", "sensor", "event", "direction"].iter().zip(&fields) {
-                            v.push((name.to_string(), Kind::Dim));
-                            v.push((value.to_string(), Kind::Normal));
-                        }
-                    } else {
+                    let (fields, note) = ipmi::sel_fields(l);
+                    if fields.is_empty() {
                         v.push((l.to_string(), Kind::Normal));
+                    }
+                    for (name, value) in fields {
+                        v.push((name.to_string(), Kind::Dim));
+                        v.push((value, Kind::Normal));
+                    }
+                    if let Some(n) = note {
+                        v.push((String::new(), Kind::Normal));
+                        v.push((n.to_string(), Kind::Dim));
                     }
                 }
             }
@@ -165,7 +196,7 @@ fn menu_screen(s: Screen, c: &Ctx) -> Vec<Line> {
         },
     };
     let mut v = vec![state, (String::new(), Kind::Normal)];
-    v.extend(menu(&actions(s, c.vendor), c.cursor));
+    v.extend(menu(&actions(s, c.vendor, c.efi_boot), c.cursor));
     v.push((String::new(), Kind::Normal));
     if s == Screen::Control {
         v.push(("! asks for confirmation, the others run at once.".into(), Kind::Dim));
@@ -275,7 +306,7 @@ pub fn render(s: Screen, c: &Ctx) -> Vec<Line> {
                     } else {
                         Kind::Normal
                     };
-                    (l.to_string(), k)
+                    (ipmi::decode_sel_line(l), k)
                 })
                 .collect();
             if v.is_empty() {
@@ -310,11 +341,11 @@ mod tests {
     #[test]
     fn fan_gate_for_other_vendor() {
         let d: Result<String, String> = Ok(" 01".into());
-        let c = Ctx { data: Some(&d), vendor: Some(674), cursor: 0, loading: false, hosts: &[], current: 0 };
+        let c = Ctx { data: Some(&d), vendor: Some(674), cursor: 0, loading: false, hosts: &[], current: 0, efi_boot: false };
         let v = render(Screen::Fan, &c);
         assert!(v[0].0.contains("not available"));
-        assert!(actions(Screen::Fan, c.vendor).is_empty());
-        let c2 = Ctx { data: Some(&d), vendor: Some(ipmi::SUPERMICRO_ID), cursor: 1, loading: false, hosts: &[], current: 0 };
+        assert!(actions(Screen::Fan, c.vendor, false).is_empty());
+        let c2 = Ctx { data: Some(&d), vendor: Some(ipmi::SUPERMICRO_ID), cursor: 1, loading: false, hosts: &[], current: 0, efi_boot: false };
         let v2 = render(Screen::Fan, &c2);
         assert!(v2[0].0.contains("Full speed"));
     }
@@ -322,7 +353,7 @@ mod tests {
     #[test]
     fn menu_stays_in_place_after_an_error() {
         let d: Result<String, String> = Err("boom".into());
-        let c = Ctx { data: Some(&d), vendor: None, cursor: 0, loading: false, hosts: &[], current: 0 };
+        let c = Ctx { data: Some(&d), vendor: None, cursor: 0, loading: false, hosts: &[], current: 0, efi_boot: false };
         let v = render(Screen::Control, &c);
         assert!(v[MENU_FIRST_LINE].0.contains("Power on"));
         assert!(v.iter().any(|l| l.0 == "error: boom"));
@@ -337,9 +368,26 @@ mod tests {
     }
 
     #[test]
+    fn filter_uses_what_is_shown() {
+        let sdr = "CPU1 Temp | 01h | ok | 3.1 | 38 degrees C\nFAN1 | 41h | ns | 7.1 | No Reading\n";
+        assert_eq!(filter(Screen::Sensors, sdr, "fan").lines().count(), 1);
+        assert_eq!(filter(Screen::Sensors, sdr, "41h"), "");
+        let sel = "1 | d | t | OEM record c0 | 000137 | 630069007000\n";
+        assert_eq!(filter(Screen::Sel, sel, "CIP"), sel);
+    }
+
+    #[test]
+    fn uefi_boot_actions() {
+        let args = |efi| actions(Screen::Control, None, efi).into_iter().map(|a| a.args.join(" ")).collect::<Vec<_>>();
+        assert!(args(false).contains(&"chassis bootdev cdrom".to_string()));
+        assert!(args(true).contains(&"chassis bootdev cdrom options=efiboot".to_string()));
+        assert!(args(true).contains(&"chassis power on".to_string()));
+    }
+
+    #[test]
     fn error_lines() {
         let d: Result<String, String> = Err("boom".into());
-        let c = Ctx { data: Some(&d), vendor: None, cursor: 0, loading: false, hosts: &[], current: 0 };
+        let c = Ctx { data: Some(&d), vendor: None, cursor: 0, loading: false, hosts: &[], current: 0, efi_boot: false };
         assert_eq!(render(Screen::Sensors, &c)[0], ("error: boom".to_string(), Kind::Bad));
     }
 }

@@ -3,6 +3,7 @@
 mod app;
 mod canvas;
 mod console;
+mod export;
 mod hosts;
 mod ipmi;
 mod ui;
@@ -18,6 +19,7 @@ use crossterm::{
 use ipmi::{Action, Screen, Target};
 use std::io::{self, Write};
 use std::num::NonZeroU16;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::JoinHandle;
@@ -43,13 +45,15 @@ usage: tetron-bmctui [-H host] [-U user] [-I iface] [--pass-file FILE]
   --console-size CxR  emulated console size (default 80x24)
   --scrollback N    console lines kept (default 50000, max 200000)
   --prefix CHAR     console command key is Ctrl-CHAR (default ])
+  --efi-boot        ask for UEFI with the \"Next boot\" actions
+  --export-dir DIR  where e saves screens (default ~/.local/state/tetron-bmctui/exports)
   --dump SCREEN     print dash|sensors|sel|fru|control|fan|hosts as text and exit
 
 The password is never accepted on the command line.
 Mouse: click screens, rows, buttons and key hints. The wheel scrolls the pane
 under the pointer. Hold Shift to select text with the terminal.
 keys: 1-9 host, Tab pane, arrows or j/k move, Enter open or run, u unlock or lock,
-      r refresh, d details, S serial console full screen, q quit.
+      r refresh, d details, / filter, e export, ? help, S serial console full screen, q quit.
 Console: Enter connects (needs unlock). Then all keys go to the host, except
 Ctrl-] followed by a command; Ctrl-] then ? lists them.
 Harmless actions run at once after unlock. Sensitive ones ask for confirmation.
@@ -63,6 +67,8 @@ struct Opts {
     relock: Option<Duration>,
     console: console::Settings,
     prefix: u8,
+    efi_boot: bool,
+    export_dir: Option<PathBuf>,
 }
 
 /// "80x24" -> (80, 24), within sizes a console can sensibly have.
@@ -99,6 +105,7 @@ fn parse_args() -> Result<Opts, String> {
     let mut minutes = RELOCK_MINUTES;
     let mut console = console::Settings::default();
     let mut prefix = app::DEFAULT_PREFIX;
+    let (mut efi_boot, mut export_dir) = (false, None);
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
         let mut val = |name: &str| it.next().ok_or(format!("{name} needs a value"));
@@ -123,7 +130,7 @@ fn parse_args() -> Result<Opts, String> {
                 t.pass_file = Some(val("--pass-file")?);
                 single_flags = true;
             }
-            "--hosts" => list = Some(std::path::PathBuf::from(val("--hosts")?)),
+            "--hosts" => list = Some(PathBuf::from(val("--hosts")?)),
             "--select" => select = Some(val("--select")?),
             "--ipmitool" => t.bin = val("--ipmitool")?,
             // Idle relock time. 0 turns it off.
@@ -131,6 +138,8 @@ fn parse_args() -> Result<Opts, String> {
             "--console-size" => (console.cols, console.rows) = parse_size(&val("--console-size")?).ok_or("--console-size needs COLSxROWS, 40x10 to 500x200")?,
             "--scrollback" => console.scrollback = val("--scrollback")?.parse().ok().filter(|n| *n <= 200_000).ok_or("--scrollback needs a number up to 200000")?,
             "--prefix" => prefix = parse_prefix(&val("--prefix")?).ok_or("--prefix needs one of a-z (not h i j m) or \\ ] ^ _")?,
+            "--efi-boot" => efi_boot = true,
+            "--export-dir" => export_dir = Some(PathBuf::from(val("--export-dir")?)),
             "--dump" => {
                 let n = val("--dump")?;
                 dump = Some(Screen::from_name(&n).ok_or(format!("unknown screen {n}"))?);
@@ -172,7 +181,7 @@ fn parse_args() -> Result<Opts, String> {
             (vec![t], 0)
         }
     };
-    Ok(Opts { hosts, current, dump, relock, console, prefix })
+    Ok(Opts { hosts, current, dump, relock, console, prefix, efi_boot, export_dir })
 }
 
 /// Raw mode, alternate screen and mouse capture. Dropping the guard restores
@@ -228,6 +237,20 @@ fn execute_action(app: &mut App, tx: &Sender<Msg>, a: Action) {
     });
 }
 
+/// Save the open screen, as filtered, and say where.
+fn export_screen(app: &mut App, dir: Option<&Path>) {
+    let Some(dir) = dir else {
+        app.status = "export: no HOME, use --export-dir".into();
+        return;
+    };
+    let lines: Vec<String> = app.lines().into_iter().map(|l| l.0).collect();
+    app.status = match export::write(dir, &app.t.label(), app.screen.title(), &lines) {
+        // The name comes first: the status line can cut off a long path.
+        Ok(p) => format!("saved {} in {}", p.file_name().unwrap_or_default().to_string_lossy(), p.parent().unwrap_or(dir).display()),
+        Err(e) => format!("export failed: {e}"),
+    };
+}
+
 /// Record and start the session of the Console pane.
 fn connect_console(app: &mut App) {
     let r = ipmi::audit(&app.t.describe(), "sol activate (pane)")
@@ -262,11 +285,13 @@ fn redraw(app: &mut App, out: &mut impl Write) -> io::Result<()> {
 }
 
 fn run(opts: Opts) -> io::Result<()> {
-    let Opts { hosts, current, relock, console, prefix, .. } = opts;
+    let Opts { hosts, current, relock, console, prefix, efi_boot, export_dir, .. } = opts;
+    let export_dir = export_dir.or_else(|| ipmi::state_dir().map(|d| d.join("exports")));
     let (tx, rx): (Sender<Msg>, Receiver<Msg>) = mpsc::channel();
     let mut app = App::new(hosts, current, relock, tx.clone());
     app.console_settings = console;
     app.prefix = prefix;
+    app.efi_boot = efi_boot;
     // Threads that are ending console sessions.
     let mut closers: Vec<JoinHandle<()>> = vec![];
     app.start_vendor();
@@ -301,6 +326,11 @@ fn run(opts: Opts) -> io::Result<()> {
         }
         for a in std::mem::take(&mut app.queue) {
             execute_action(&mut app, &tx, a);
+            dirty = true;
+        }
+        if app.want_export {
+            app.want_export = false;
+            export_screen(&mut app, export_dir.as_deref());
             dirty = true;
         }
         for c in std::mem::take(&mut app.closing) {
@@ -345,7 +375,7 @@ fn dump(hosts: &[Target], current: usize, s: Screen) -> i32 {
     let vendor = if s == Screen::Fan { ipmi::fetch_vendor(t) } else { None };
     let data = ipmi::fetch(t, s);
     let failed = data.is_err();
-    for (l, _) in view::render(s, &view::Ctx { data: Some(&data), vendor, cursor: usize::MAX, loading: false, hosts, current }) {
+    for (l, _) in view::render(s, &view::Ctx { data: Some(&data), vendor, cursor: usize::MAX, loading: false, hosts, current, efi_boot: false }) {
         // The same filter as on screen: BMC text never reaches the terminal raw.
         println!("{}", l.chars().map(canvas::safe_char).collect::<String>());
     }

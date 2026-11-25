@@ -10,7 +10,7 @@
 use crate::app::{App, Hit, Mode, NAV, Pane};
 use crate::canvas::{Canvas, Rect};
 use crate::ipmi::{self, Screen};
-use crate::view::{Kind, wrap};
+use crate::view::{self, Kind, wrap};
 use crossterm::event::KeyCode;
 
 pub const WIDE: usize = 120;
@@ -94,6 +94,11 @@ fn host_tab(app: &App, i: usize) -> String {
         Some(true) => "ok",
         Some(false) => "error",
         None => "unknown",
+    };
+    // Only the host in use is contacted, so each state carries its time.
+    let state = match &app.states[i].checked {
+        Some(at) => format!("{state} {at}"),
+        None => state.to_string(),
     };
     // Only the first nine hosts have a number key.
     let key = if i < 9 { format!("{} ", i + 1) } else { String::new() };
@@ -286,8 +291,13 @@ fn draw_console_details(app: &mut App, c: &mut Canvas, r: Rect) {
 }
 
 fn draw_main(app: &mut App, c: &mut Canvas, r: Rect) {
-    let title = app.screen.title();
-    pane(app, c, r, Pane::Main, title);
+    let mut title = app.screen.title().to_string();
+    if app.filtering {
+        title = format!("{title}  /{}_", app.filter);
+    } else if !app.filter.is_empty() {
+        title = format!("{title}  /{}  (Esc clears)", app.filter);
+    }
+    pane(app, c, r, Pane::Main, &title);
     let a = inner(r);
     app.view_rows = a.h.max(1);
     app.scroll = app.scroll.min(app.max_scroll());
@@ -367,29 +377,107 @@ fn key_hints(app: &mut App, c: &mut Canvas, y: usize) {
         }
         return;
     }
-    let mut hints = vec![("Tab pane", KeyCode::Tab)];
-    if app.screen == Screen::Console && !app.console_live() {
-        hints.push(("Enter connect", KeyCode::Enter));
+    let mut hints = vec![];
+    if app.filtering {
+        hints.push(("Enter keep filter", KeyCode::Enter));
+        hints.push(("Esc clear", KeyCode::Esc));
+    } else {
+        // Help and quit come first: on a narrow terminal the hints at the end
+        // are left out, and help lists all keys.
+        hints.push(("? help", KeyCode::Char('?')));
+        hints.push(("q quit", KeyCode::Char('q')));
+        if app.screen == Screen::Console && !app.console_live() {
+            hints.push(("Enter connect", KeyCode::Enter));
+            hints.push(("S full screen", KeyCode::Char('S')));
+        }
+        if !app.menu().is_empty() {
+            hints.push(("Enter run", KeyCode::Enter));
+        }
+        hints.push((if app.unlocked { "u lock" } else { "u unlock" }, KeyCode::Char('u')));
+        if view::filterable(app.screen) {
+            hints.push(("/ filter", KeyCode::Char('/')));
+        }
+        hints.push(("Tab pane", KeyCode::Tab));
+        hints.push(("r refresh", KeyCode::Char('r')));
+        hints.push(("d details", KeyCode::Char('d')));
+        if app.screen != Screen::Console {
+            hints.push(("e export", KeyCode::Char('e')));
+        }
     }
-    if !app.menu().is_empty() {
-        hints.push(("Enter run", KeyCode::Enter));
-    }
-    hints.push((if app.unlocked { "u lock" } else { "u unlock" }, KeyCode::Char('u')));
-    hints.push(("r refresh", KeyCode::Char('r')));
-    hints.push(("d details", KeyCode::Char('d')));
-    hints.push(("S console", KeyCode::Char('S')));
-    hints.push(("q quit", KeyCode::Char('q')));
     let mut x = 1;
     for (label, code) in hints {
         x = button(app, c, x, y, label, Hit::Key(code), Kind::Dim) + 2;
     }
 }
 
+/// Text of the help window.
+fn help_text(app: &App) -> Vec<String> {
+    let mut v: Vec<String> = [
+        "Tab, Shift-Tab  next or previous pane",
+        "arrows, j, k    move in the focused pane",
+        "PgUp PgDn g G   move by page, to an end",
+        "Enter           open, run or connect",
+        "1 to 9          switch host (locks)",
+        "u               unlock or lock writes",
+        "/               filter, Esc clears it",
+        "e               export screen to a file",
+        "d               show or hide details",
+        "r               refresh",
+        "S               full screen console",
+        "?               this help",
+        "q               quit",
+        "",
+        "Mouse: click screens, hosts, rows and",
+        "buttons. The wheel scrolls.",
+        "",
+    ]
+    .map(String::from)
+    .to_vec();
+    let p = app.prefix_name();
+    v.extend([
+        "Connected console: keys go to the host.".into(),
+        format!("{p} then:"),
+        "  .      disconnect".into(),
+        "  z      zoom".into(),
+        "  [      scroll back".into(),
+        "  Tab    next pane".into(),
+        "  u d q ? and 1 to 9 as above".into(),
+        format!("  {p} send it to the host"),
+        "".into(),
+        "Writes are recorded in the audit log.".into(),
+    ]);
+    v
+}
+
+fn draw_help(app: &mut App, c: &mut Canvas) {
+    let lines = help_text(app);
+    let w = 46.min(c.w);
+    let h = (lines.len() + 4).min(c.h);
+    let r = Rect::new((c.w - w) / 2, (c.h - h) / 2, w, h);
+    app.hits.clear();
+    c.clear(r);
+    c.frame(r);
+    c.text(r.x + 2, r.y, w - 4, " Help ", Kind::Sel);
+    // Border, text, blank, button, border.
+    let rows = h.saturating_sub(4).max(1);
+    app.help_scroll = app.help_scroll.min(lines.len().saturating_sub(rows));
+    for (i, line) in lines.iter().skip(app.help_scroll).take(rows).enumerate() {
+        c.text(r.x + 2, r.y + 1 + i, w - 4, line, Kind::Normal);
+    }
+    let x = button(app, c, r.x + 2, r.y + h - 2, "[ Close (Esc) ]", Hit::DialogCancel, Kind::Head);
+    if rows < lines.len() {
+        c.text(x + 2, r.y + h - 2, (r.x + w).saturating_sub(x + 4), "arrows scroll", Kind::Dim);
+    }
+}
+
 /// Draw the open dialog on top of everything. It also replaces all clickable
 /// regions, so nothing behind it can be clicked.
 fn dialog(app: &mut App, c: &mut Canvas) {
+    if matches!(app.mode, Mode::Help) {
+        return draw_help(app, c);
+    }
     let (title, text, ok, anchor) = match &app.mode {
-        Mode::Normal => return,
+        Mode::Normal | Mode::Help => return,
         Mode::Unlock { anchor, connect } => (
             "Unlock",
             vec![

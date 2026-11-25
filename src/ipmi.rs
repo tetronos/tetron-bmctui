@@ -92,6 +92,12 @@ pub fn control_actions() -> Vec<Action> {
         act("Identify LED 15 s", &["chassis", "identify", "15"], Risk::Low),
         act("Clear event log", &["sel", "clear"], Risk::High),
         act("BMC cold reset", &["mc", "reset", "cold"], Risk::High),
+        // The override applies to the next boot only. It can start an
+        // installer or other media, so it asks first.
+        act("Next boot: network (PXE)", &["chassis", "bootdev", "pxe"], Risk::High),
+        act("Next boot: disk", &["chassis", "bootdev", "disk"], Risk::High),
+        act("Next boot: CD/DVD", &["chassis", "bootdev", "cdrom"], Risk::High),
+        act("Next boot: BIOS setup", &["chassis", "bootdev", "bios"], Risk::High),
     ]
 }
 
@@ -256,18 +262,78 @@ pub fn parse_manufacturer(s: &str) -> Option<u32> {
     })
 }
 
-fn audit_path() -> Option<std::path::PathBuf> {
+/// IANA enterprise number 311, printed by ipmitool as six hex digits.
+const MICROSOFT_OEM: &str = "000137";
+
+/// Text carried by an OEM event record, when its data is UTF-16LE made of
+/// printable ASCII, padded with zeros. Anything else gives `None`.
+pub fn oem_text(data: &str) -> Option<String> {
+    if data.is_empty() || !data.len().is_multiple_of(4) || !data.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let mut out = String::new();
+    for unit in data.as_bytes().chunks(4) {
+        let unit = std::str::from_utf8(unit).ok()?;
+        let (low, high) = (u8::from_str_radix(&unit[..2], 16).ok()?, u8::from_str_radix(&unit[2..], 16).ok()?);
+        match (low, high) {
+            (0, 0) => {}
+            (0x20..=0x7e, 0) => out.push(low as char),
+            _ => return None,
+        }
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+/// An event log line with the text of an OEM record added.
+pub fn decode_sel_line(line: &str) -> String {
+    let f: Vec<&str> = line.split('|').map(str::trim).collect();
+    if f.len() == 6 && f[3].starts_with("OEM record") && let Some(t) = oem_text(f[5]) {
+        return format!("{line} | \"{t}\"");
+    }
+    line.to_string()
+}
+
+/// Names and values of one event log line, for the details pane, with a note
+/// where ipmitool could not make sense of the record.
+pub fn sel_fields(line: &str) -> (Vec<(&'static str, String)>, Option<&'static str>) {
+    let f: Vec<&str> = line.split('|').map(str::trim).collect();
+    if f.len() < 6 {
+        return (vec![], None);
+    }
+    let oem = f[3].starts_with("OEM record");
+    let names = if oem { ["id", "date", "time", "type", "manufacturer", "data"] } else { ["id", "date", "time", "sensor", "event", "direction"] };
+    let mut v: Vec<(&'static str, String)> = names.into_iter().zip(f.iter().map(|s| s.to_string())).collect();
+    let note = if oem {
+        if let Some(t) = oem_text(f[5]) {
+            v.push(("data as text", t));
+        }
+        if f[4] == MICROSOFT_OEM {
+            v.push(("maker", "Microsoft (IANA 311)".into()));
+        }
+        Some("OEM records are private to their maker. Long text may be split over several records.")
+    } else if f[3] == "Unknown #0xff" {
+        Some("ipmitool has no name for this record and it carries no event text. Its meaning is not known.")
+    } else if f[3].contains(" #0x") {
+        Some("ipmitool found no name for this sensor number.")
+    } else {
+        None
+    };
+    (v, note)
+}
+
+/// `$XDG_STATE_HOME/tetron-bmctui`, by default below `~/.local/state`.
+pub fn state_dir() -> Option<std::path::PathBuf> {
     let base = match std::env::var_os("XDG_STATE_HOME") {
         Some(p) if !p.is_empty() => std::path::PathBuf::from(p),
         _ => std::path::PathBuf::from(std::env::var_os("HOME")?).join(".local/state"),
     };
-    Some(base.join("tetron-bmctui").join("audit.log"))
+    Some(base.join("tetron-bmctui"))
 }
 
 /// Append one line to the audit log (mode 0600). Writes are refused by the
 /// caller when this fails, so no write goes unrecorded.
 pub fn audit(host: &str, line: &str) -> Result<(), String> {
-    let p = audit_path().ok_or("no HOME for the audit log")?;
+    let p = state_dir().ok_or("no HOME for the audit log")?.join("audit.log");
     if let Some(d) = p.parent() {
         std::fs::create_dir_all(d).map_err(|e| format!("audit dir: {e}"))?;
     }
@@ -299,6 +365,22 @@ mod tests {
         assert_eq!(parse_fan_mode(""), None);
         assert_eq!(parse_manufacturer("Device ID : 32\nManufacturer ID         : 10876\n"), Some(SUPERMICRO_ID));
         assert_eq!(parse_manufacturer("nothing"), None);
+    }
+
+    #[test]
+    fn oem_records() {
+        assert_eq!(oem_text("630069007000").as_deref(), Some("cip"));
+        assert_eq!(oem_text("41007d000000").as_deref(), Some("A}"));
+        for not_text in ["040000000000", "000000000000", "ff0041004100", "zz00", "6300690", ""] {
+            assert_eq!(oem_text(not_text), None, "{not_text}");
+        }
+        let line = " 1e0 | 07/26/2024 | 12:19:29 PM PDT | OEM record c0 | 000137 | 630069007000";
+        assert!(decode_sel_line(line).ends_with("| \"cip\""));
+        let (fields, note) = sel_fields(line);
+        assert!(fields.contains(&("data as text", "cip".into())) && note.is_some());
+        let unknown = " 278 | 12/15/2019 | 09:48:58 PM PST | Unknown #0xff |  | Asserted";
+        assert_eq!(decode_sel_line(unknown), unknown);
+        assert!(sel_fields(unknown).1.unwrap().contains("not known"));
     }
 
     #[test]
