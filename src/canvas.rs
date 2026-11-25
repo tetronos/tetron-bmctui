@@ -43,6 +43,17 @@ pub fn safe_char(c: char) -> char {
     }
 }
 
+/// Like `safe_char`, for cells of the console emulator. Line drawing and Latin-1
+/// characters pass too, since boot menus use them and each takes one cell.
+/// Control characters never do.
+pub fn safe_term_char(c: char) -> char {
+    match c {
+        ' '..='~' | '\u{a1}'..='\u{ac}' | '\u{ae}'..='\u{ff}' | '\u{2500}'..='\u{259f}' => c,
+        '\u{a0}' => ' ',
+        _ => '?',
+    }
+}
+
 pub struct Canvas {
     pub w: usize,
     pub h: usize,
@@ -64,6 +75,13 @@ impl Canvas {
                 break;
             }
             self.cells[y * self.w + x + i] = (safe_char(c), kind);
+        }
+    }
+
+    /// Put one console cell at (x, y).
+    pub fn term_cell(&mut self, x: usize, y: usize, c: char, kind: Kind) {
+        if x < self.w && y < self.h {
+            self.cells[y * self.w + x] = (safe_term_char(c), kind);
         }
     }
 

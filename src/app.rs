@@ -7,6 +7,7 @@
 //! runs them. Tests can therefore check what would run without running it.
 
 use crate::canvas::Rect;
+use crate::console::{self, Console};
 use crate::ipmi::{self, Action, Risk, Screen, Target};
 use crate::view;
 use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -17,26 +18,20 @@ use std::time::{Duration, Instant};
 /// Rows moved by one mouse wheel step.
 const WHEEL_STEP: usize = 3;
 
-/// Entries of the navigation pane, in display order. The console is listed
-/// first. It is greyed out until the console pane is built.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum NavItem {
-    Console,
-    Page(Screen),
-}
-
-pub const NAV: [NavItem; 8] = [
-    NavItem::Console,
-    NavItem::Page(Screen::Dash),
-    NavItem::Page(Screen::Sensors),
-    NavItem::Page(Screen::Sel),
-    NavItem::Page(Screen::Fru),
-    NavItem::Page(Screen::Control),
-    NavItem::Page(Screen::Fan),
-    NavItem::Page(Screen::Hosts),
+/// Entries of the navigation pane, in display order. The console is first.
+pub const NAV: [Screen; 8] = [
+    Screen::Console,
+    Screen::Dash,
+    Screen::Sensors,
+    Screen::Sel,
+    Screen::Fru,
+    Screen::Control,
+    Screen::Fan,
+    Screen::Hosts,
 ];
 
-const CONSOLE_REASON: &str = "console pane is not built yet. S opens ipmitool serial over LAN full screen.";
+/// Default console command key: Ctrl-], as in telnet.
+pub const DEFAULT_PREFIX: u8 = 0x1d;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Pane {
@@ -59,6 +54,10 @@ pub enum Hit {
     Run,
     /// A host tab in the top bar, by index in `App::hosts`.
     Host(usize),
+    /// Console buttons: connect, and the commands that otherwise follow the
+    /// prefix key.
+    Connect,
+    Command(char),
     /// A key hint or button that stands for a key press.
     Key(KeyCode),
     /// The accept button of the open dialog.
@@ -73,8 +72,8 @@ pub enum Hit {
 #[derive(Clone, Debug)]
 pub enum Mode {
     Normal,
-    /// "Unlock writes on HOST?"
-    Unlock { anchor: Option<(usize, usize)> },
+    /// "Unlock writes on HOST?" With `connect` the console is opened next.
+    Unlock { anchor: Option<(usize, usize)>, connect: bool },
     /// "Run ACTION on HOST?" for sensitive actions.
     Confirm { act: Action, anchor: Option<(usize, usize)> },
 }
@@ -130,6 +129,22 @@ pub struct App {
     pub vendor: Option<u32>,
     vendor_pending: bool,
     pub want_sol: bool,
+    /// The session in the Console pane, live or ended.
+    pub console: Option<Console>,
+    /// The main loop starts a session when set.
+    pub want_connect: bool,
+    /// Sessions to be ended by the main loop, which does not block on them.
+    pub closing: Vec<Console>,
+    pub console_settings: console::Settings,
+    /// Byte of the console command key.
+    pub prefix: u8,
+    /// The prefix was pressed: the next key is a console command.
+    pub prefix_pending: bool,
+    /// Keys move through the scrollback instead of going to the host.
+    pub scroll_mode: bool,
+    /// The console takes the whole terminal.
+    pub zoom: bool,
+    was_live: bool,
     pub quit: bool,
     /// Confirmed or harmless actions waiting to be run by the main loop.
     pub queue: Vec<Action>,
@@ -172,6 +187,15 @@ impl App {
             vendor: None,
             vendor_pending: false,
             want_sol: false,
+            console: None,
+            want_connect: false,
+            closing: vec![],
+            console_settings: console::Settings::default(),
+            prefix: DEFAULT_PREFIX,
+            prefix_pending: false,
+            scroll_mode: false,
+            zoom: false,
+            was_live: false,
             quit: false,
             queue: vec![],
             hits: vec![],
@@ -188,7 +212,7 @@ impl App {
 
     /// Fetch a screen in a worker thread. At most one fetch per screen runs.
     pub fn refresh(&mut self, s: Screen) {
-        if s == Screen::Hosts || !self.loading.insert(s) {
+        if matches!(s, Screen::Hosts | Screen::Console) || !self.loading.insert(s) {
             return;
         }
         self.last.insert(s, Instant::now());
@@ -252,6 +276,22 @@ impl App {
     /// Periodic work: idle relock and auto refresh of the live screens.
     pub fn tick(&mut self, now: Instant) -> bool {
         let mut changed = false;
+        // New console output needs a redraw. The idle relock below does not
+        // touch the console: once connected, typing has no further gate.
+        if let Some(c) = &self.console {
+            changed |= c.take_dirty();
+            let live = c.live();
+            if self.was_live && !live {
+                self.status = if c.busy_elsewhere() {
+                    "console is in use by another session. t takes it over.".into()
+                } else {
+                    "console session ended. Enter connects again.".into()
+                };
+                self.scroll_mode = false;
+                changed = true;
+            }
+            self.was_live = live;
+        }
         if let Some(limit) = self.relock
             && self.unlocked
             && now.saturating_duration_since(self.last_input) >= limit
@@ -290,6 +330,7 @@ impl App {
         self.lock("writes locked");
         self.queue.clear();
         self.want_sol = false;
+        self.disconnect();
         self.current = i;
         self.t = t;
         self.epoch += 1;
@@ -307,6 +348,178 @@ impl App {
         // The host screen stays as it is. Other screens are fetched again.
         if self.screen != Screen::Hosts {
             self.switch(self.screen);
+        }
+    }
+
+    // ----- console ----------------------------------------------------------
+
+    pub fn console_live(&self) -> bool {
+        self.console.as_ref().is_some_and(|c| c.live())
+    }
+
+    /// True while key presses go to the host: a live console on screen, with
+    /// the keyboard focus and nothing else asking for the keys.
+    pub fn typing(&self) -> bool {
+        matches!(self.mode, Mode::Normal) && self.screen == Screen::Console && self.focus == Pane::Main && !self.scroll_mode && self.console_live()
+    }
+
+    /// Open the console. This is the one gate: it needs unlock, and after that
+    /// typing is not asked about again.
+    pub fn connect(&mut self) {
+        if self.console_live() {
+            return;
+        }
+        if !self.unlocked {
+            self.mode = Mode::Unlock { anchor: self.pointer, connect: true };
+            return;
+        }
+        self.want_connect = true;
+    }
+
+    /// The main loop reports the result of starting a session.
+    pub fn connected(&mut self, r: Result<Console, String>) {
+        match r {
+            Ok(c) => {
+                self.disconnect();
+                self.console = Some(c);
+                self.was_live = true;
+                self.focus = Pane::Main;
+                self.status = format!("console connected. Keys go to the host. {} then ? lists commands.", self.prefix_name());
+            }
+            Err(e) => self.status = format!("console: {e}"),
+        }
+    }
+
+    /// Drop the session. The main loop ends it.
+    pub fn disconnect(&mut self) {
+        self.scroll_mode = false;
+        self.prefix_pending = false;
+        self.zoom = false;
+        self.was_live = false;
+        if let Some(c) = self.console.take() {
+            self.closing.push(c);
+        }
+    }
+
+    /// "Ctrl-]" and the like.
+    pub fn prefix_name(&self) -> String {
+        let c = (self.prefix | 0x40) as char;
+        format!("Ctrl-{}", c.to_ascii_lowercase())
+    }
+
+    /// Offer to end the session that blocks ours. This is a write, so it goes
+    /// through the same unlock and confirmation as other sensitive actions.
+    pub fn take_over(&mut self) {
+        if !self.console.as_ref().is_some_and(|c| c.busy_elsewhere()) {
+            return;
+        }
+        if !self.unlocked {
+            self.status = "locked: press u to unlock writes".into();
+            return;
+        }
+        let act = Action {
+            label: "End the other console session".into(),
+            args: vec!["sol".into(), "deactivate".into()],
+            risk: Risk::High,
+        };
+        self.mode = Mode::Confirm { act, anchor: self.pointer };
+    }
+
+    fn scroll_console(&mut self, delta: isize) {
+        if let Some(c) = &self.console {
+            c.scroll(delta);
+        }
+    }
+
+    fn live_view(&mut self) {
+        self.scroll_mode = false;
+        if let Some(c) = &self.console {
+            c.scroll_to_live();
+        }
+    }
+
+    /// A command: the key after the prefix, or the matching button.
+    pub fn command(&mut self, c: char) {
+        self.prefix_pending = false;
+        match c {
+            '.' => {
+                self.disconnect();
+                self.status = "console disconnected".into();
+            }
+            'z' => {
+                self.zoom = !self.zoom;
+                if self.zoom {
+                    self.focus = Pane::Main;
+                }
+            }
+            '[' => {
+                self.scroll_mode = self.console.is_some();
+                self.focus = Pane::Main;
+            }
+            '\t' => {
+                self.zoom = false;
+                self.cycle_focus(1);
+            }
+            'q' => self.quit = true,
+            'u' => self.toggle_lock(),
+            'd' => self.toggle_details(),
+            '?' => self.status = format!("after {}: . disconnect, z zoom, [ scroll, Tab pane, u lock, d details, 1-9 host, q quit; twice sends it", self.prefix_name()),
+            '1'..='9' => self.switch_host(c as usize - '1' as usize),
+            _ => self.status = format!("no console command {c:?}. {} then ? lists them.", self.prefix_name()),
+        }
+    }
+
+    /// Handle a key on the Console screen. False leaves it to the normal key
+    /// handling.
+    fn console_key(&mut self, code: KeyCode, mods: KeyModifiers) -> bool {
+        if self.screen != Screen::Console {
+            return false;
+        }
+        let is_prefix = mods.contains(KeyModifiers::CONTROL) && matches!(code, KeyCode::Char(c) if console::ctrl_byte(c) == Some(self.prefix));
+        if self.prefix_pending {
+            self.prefix_pending = false;
+            if is_prefix {
+                self.send_to_host(code, mods);
+                return true;
+            }
+            match code {
+                KeyCode::Char(c) => self.command(c),
+                KeyCode::Tab => self.command('\t'),
+                _ => self.status = "console command cancelled".into(),
+            }
+            return true;
+        }
+        if is_prefix {
+            self.prefix_pending = true;
+            return true;
+        }
+        let page = self.view_rows.max(2) as isize - 1;
+        if self.scroll_mode {
+            match code {
+                KeyCode::Up | KeyCode::Char('k') => self.scroll_console(1),
+                KeyCode::Down | KeyCode::Char('j') => self.scroll_console(-1),
+                KeyCode::PageUp => self.scroll_console(page),
+                KeyCode::PageDown => self.scroll_console(-page),
+                KeyCode::Home | KeyCode::Char('g') => self.scroll_console(isize::MAX / 2),
+                // Any other key returns to the live screen and is not sent.
+                _ => self.live_view(),
+            }
+            return true;
+        }
+        if self.typing() {
+            self.send_to_host(code, mods);
+            return true;
+        }
+        false
+    }
+
+    fn send_to_host(&mut self, code: KeyCode, mods: KeyModifiers) {
+        let Some(c) = &self.console else { return };
+        let app_cursor = c.screen().screen().application_cursor();
+        if let Some(bytes) = console::encode_key(code, mods, app_cursor) {
+            // Typing shows what is being typed at.
+            c.scroll_to_live();
+            c.send(bytes);
         }
     }
 
@@ -405,7 +618,7 @@ impl App {
 
     pub fn focus_pane(&mut self, p: Pane) {
         if p == Pane::Nav && self.focus != Pane::Nav {
-            self.nav_cursor = NAV.iter().position(|n| *n == NavItem::Page(self.screen)).unwrap_or(1);
+            self.nav_cursor = NAV.iter().position(|n| *n == self.screen).unwrap_or(1);
         }
         self.focus = p;
     }
@@ -437,6 +650,9 @@ impl App {
 
     pub fn switch(&mut self, s: Screen) {
         self.screen = s;
+        self.scroll_mode = false;
+        self.prefix_pending = false;
+        self.zoom = false;
         self.scroll = 0;
         self.detail_scroll = 0;
         self.cursor = 0;
@@ -452,21 +668,18 @@ impl App {
 
     /// Open a navigation entry (Enter in the navigation pane, or a click).
     fn activate_nav(&mut self, i: usize) {
-        let Some(item) = NAV.get(i) else { return };
+        let Some(&screen) = NAV.get(i) else { return };
         self.nav_cursor = i;
-        match *item {
-            NavItem::Console => self.status = CONSOLE_REASON.into(),
-            NavItem::Page(s) => {
-                self.switch(s);
-                self.focus = if self.pane_cycle().contains(&Pane::Main) { Pane::Main } else { Pane::Details };
-            }
-        }
+        self.switch(screen);
+        self.focus = if self.pane_cycle().contains(&Pane::Main) { Pane::Main } else { Pane::Details };
     }
 
     // ----- writes -----------------------------------------------------------
 
     fn lock(&mut self, why: &str) {
         self.unlocked = false;
+        // A console that is still waiting to be opened passed the gate before.
+        self.want_connect = false;
         // An open confirmation belongs to the unlocked state, so it closes too.
         self.mode = Mode::Normal;
         self.status = why.into();
@@ -476,7 +689,7 @@ impl App {
         if self.unlocked {
             self.lock("locked: read-only");
         } else {
-            self.mode = Mode::Unlock { anchor: self.pointer };
+            self.mode = Mode::Unlock { anchor: self.pointer, connect: false };
         }
     }
 
@@ -503,7 +716,9 @@ impl App {
     }
 
     fn open_sol(&mut self) {
-        if self.unlocked {
+        if self.console_live() {
+            self.status = "the console pane is connected: disconnect it first".into();
+        } else if self.unlocked {
             self.want_sol = true;
         } else {
             self.status = "locked: press u to unlock, the console can type into the host".into();
@@ -512,9 +727,10 @@ impl App {
 
     fn dialog_ok(&mut self) {
         match std::mem::replace(&mut self.mode, Mode::Normal) {
-            Mode::Unlock { .. } => {
+            Mode::Unlock { connect, .. } => {
                 self.unlocked = true;
                 self.status = "writes unlocked".into();
+                self.want_connect |= connect;
             }
             Mode::Confirm { act, .. } => {
                 if self.unlocked {
@@ -534,6 +750,16 @@ impl App {
 
     pub fn key(&mut self, code: KeyCode, mods: KeyModifiers) {
         self.touch();
+        // The console sees keys first, so that Ctrl-C reaches the host.
+        if matches!(self.mode, Mode::Normal) && self.console_key(code, mods) {
+            return;
+        }
+        self.app_key(code, mods);
+    }
+
+    /// A key meant for the program itself. Clickable key hints come here
+    /// directly, so a click is never typed into the host.
+    fn app_key(&mut self, code: KeyCode, mods: KeyModifiers) {
         if code == KeyCode::Char('c') && mods.contains(KeyModifiers::CONTROL) {
             self.quit = true;
             return;
@@ -572,8 +798,10 @@ impl App {
             KeyCode::PageUp => self.step(-page),
             KeyCode::Home | KeyCode::Char('g') => self.step(isize::MIN / 2),
             KeyCode::End | KeyCode::Char('G') => self.step(isize::MAX / 2),
+            KeyCode::Char('t') if self.screen == Screen::Console => self.take_over(),
             KeyCode::Enter => match self.focus {
                 Pane::Nav => self.activate_nav(self.nav_cursor),
+                _ if self.screen == Screen::Console => self.connect(),
                 Pane::Main | Pane::Details => self.pick(),
             },
             _ => {}
@@ -583,6 +811,8 @@ impl App {
     /// Up and down act on whichever pane has the focus.
     fn step(&mut self, delta: isize) {
         match self.focus {
+            // Up is back in time on the console.
+            Pane::Main if self.screen == Screen::Console => self.scroll_console(delta.saturating_neg()),
             Pane::Nav => self.nav_cursor = self.nav_cursor.saturating_add_signed(delta).min(NAV.len() - 1),
             Pane::Main => self.move_cursor(delta),
             Pane::Details => self.scroll_details(delta),
@@ -660,7 +890,9 @@ impl App {
             }
             Hit::Host(i) => self.switch_host(i),
             Hit::Run => self.pick(),
-            Hit::Key(k) => self.key(k, KeyModifiers::NONE),
+            Hit::Key(k) => self.app_key(k, KeyModifiers::NONE),
+            Hit::Connect => self.connect(),
+            Hit::Command(c) => self.command(c),
             Hit::DialogOk | Hit::DialogCancel => {}
         }
     }
@@ -676,6 +908,7 @@ impl App {
             _ => None,
         });
         match pane {
+            Some(Pane::Main) if self.screen == Screen::Console => self.scroll_console(-delta),
             Some(Pane::Main) => self.scroll = self.scroll.saturating_add_signed(delta).min(self.max_scroll()),
             Some(Pane::Details) => self.scroll_details(delta),
             // The navigation list is short and does not scroll.
@@ -724,7 +957,7 @@ mod tests {
     }
 
     fn open_power(a: &mut App) {
-        let i = NAV.iter().position(|n| *n == NavItem::Page(Screen::Control)).unwrap();
+        let i = NAV.iter().position(|n| *n == Screen::Control).unwrap();
         click(a, Hit::Nav(i));
         assert_eq!(a.screen, Screen::Control);
     }
@@ -841,12 +1074,157 @@ mod tests {
         assert_eq!((a.screen, a.focus), (Screen::Sensors, Pane::Main));
     }
 
+    /// Open the Console screen with a fake session that has printed `output`.
+    fn with_console(a: &mut App, output: &[u8]) -> std::sync::mpsc::Receiver<Vec<u8>> {
+        click(a, Hit::Nav(0));
+        let (c, rx) = Console::fake(&a.t, output);
+        a.connected(Ok(c));
+        ui::draw(a, 120, 28);
+        rx
+    }
+
+    fn ctrl(a: &mut App, c: char) {
+        a.key(KeyCode::Char(c), KeyModifiers::CONTROL);
+        ui::draw(a, 120, 28);
+    }
+
+    fn sent(rx: &std::sync::mpsc::Receiver<Vec<u8>>) -> Vec<u8> {
+        rx.try_iter().flatten().collect()
+    }
+
     #[test]
-    fn console_is_greyed_with_a_reason() {
+    fn connecting_needs_unlock_once() {
         let mut a = app(120, 28);
         click(&mut a, Hit::Nav(0));
-        assert_eq!(a.screen, Screen::Dash);
-        assert!(a.status.contains("not built"));
+        press(&mut a, KeyCode::Enter);
+        assert!(matches!(a.mode, Mode::Unlock { connect: true, .. }) && !a.want_connect);
+        press(&mut a, KeyCode::Enter);
+        assert!(!a.want_connect, "Enter alone must not unlock");
+        press(&mut a, KeyCode::Esc);
+        assert!(!a.want_connect && !a.unlocked);
+        click(&mut a, Hit::Connect);
+        click(&mut a, Hit::DialogOk);
+        assert!(a.want_connect && a.unlocked);
+    }
+
+    #[test]
+    fn typed_keys_go_to_the_host() {
+        let mut a = app(120, 28);
+        let rx = with_console(&mut a, b"");
+        for c in ['q', 'u', 'r', '1', 'S', 'y'] {
+            press(&mut a, KeyCode::Char(c));
+        }
+        press(&mut a, KeyCode::Tab);
+        press(&mut a, KeyCode::Enter);
+        ctrl(&mut a, 'c');
+        assert_eq!(sent(&rx), b"qur1Sy\t\r\x03");
+        assert!(!a.quit && !a.unlocked);
+    }
+
+    #[test]
+    fn typing_survives_the_idle_relock() {
+        let mut a = app(120, 28);
+        a.unlocked = true;
+        let rx = with_console(&mut a, b"");
+        a.tick(Instant::now() + Duration::from_secs(901));
+        assert!(!a.unlocked, "other writes lock");
+        press(&mut a, KeyCode::Char('x'));
+        assert_eq!(sent(&rx), b"x");
+    }
+
+    #[test]
+    fn prefix_commands_and_literal_prefix() {
+        let mut a = app(120, 28);
+        let rx = with_console(&mut a, b"");
+        // Ctrl-] arrives from the terminal as Ctrl-5.
+        ctrl(&mut a, '5');
+        ctrl(&mut a, '5');
+        assert_eq!(sent(&rx), [0x1d]);
+        ctrl(&mut a, '5');
+        press(&mut a, KeyCode::Tab);
+        assert!(a.focus != Pane::Main && sent(&rx).is_empty());
+        press(&mut a, KeyCode::Down);
+        assert!(sent(&rx).is_empty(), "without focus nothing is typed");
+        a.focus = Pane::Main;
+        ctrl(&mut a, '5');
+        press(&mut a, KeyCode::Char('.'));
+        assert!(a.console.is_none() && a.closing.len() == 1 && sent(&rx).is_empty());
+    }
+
+    #[test]
+    fn clicks_are_never_typed() {
+        let mut a = app(120, 28);
+        let rx = with_console(&mut a, b"");
+        let regions: Vec<(Rect, Hit)> = a.hits.clone();
+        for (r, h) in regions {
+            if matches!(h, Hit::Key(_)) {
+                click_at(&mut a, r.x, r.y);
+                a.mode = Mode::Normal;
+                a.quit = false;
+            }
+        }
+        click(&mut a, Hit::Command('z'));
+        assert!(a.zoom && sent(&rx).is_empty());
+    }
+
+    #[test]
+    fn scrollback_by_keys_and_wheel() {
+        let mut a = app(120, 28);
+        let output: String = (0..100).map(|i| format!("line {i}\r\n")).collect();
+        let rx = with_console(&mut a, output.as_bytes());
+        a.mouse(MouseEvent { kind: MouseEventKind::ScrollUp, column: 40, row: 10, modifiers: KeyModifiers::NONE });
+        assert_eq!(a.console.as_ref().unwrap().scrolled(), WHEEL_STEP);
+        press(&mut a, KeyCode::Char('a'));
+        assert_eq!((a.console.as_ref().unwrap().scrolled(), sent(&rx)), (0, b"a".to_vec()));
+        ctrl(&mut a, '5');
+        press(&mut a, KeyCode::Char('['));
+        press(&mut a, KeyCode::Home);
+        assert_eq!(a.console.as_ref().unwrap().scrolled(), 77);
+        let c = ui::draw(&mut a, 120, 28);
+        assert!(c.row(2).contains("line 0"), "{}", c.row(2));
+        press(&mut a, KeyCode::Char('x'));
+        assert_eq!(a.console.as_ref().unwrap().scrolled(), 0);
+        assert!(!a.scroll_mode && sent(&rx).is_empty(), "the key that leaves scrolling is not sent");
+    }
+
+    #[test]
+    fn host_switch_disconnects_the_console() {
+        let mut a = two_hosts();
+        let rx = with_console(&mut a, b"");
+        ctrl(&mut a, '5');
+        press(&mut a, KeyCode::Char('2'));
+        assert_eq!(a.current, 1);
+        assert!(a.console.is_none() && a.closing.len() == 1);
+        press(&mut a, KeyCode::Enter);
+        assert!(matches!(a.mode, Mode::Unlock { connect: true, .. }), "the new host has its own gate");
+        assert!(sent(&rx).is_empty());
+    }
+
+    #[test]
+    fn a_waiting_connect_does_not_survive_a_lock_or_host_switch() {
+        let mut a = two_hosts();
+        a.switch(Screen::Console);
+        a.unlocked = true;
+        a.connect();
+        assert!(a.want_connect);
+        a.switch_host(1);
+        assert!(!a.want_connect && !a.unlocked);
+    }
+
+    #[test]
+    fn take_over_needs_unlock_and_confirmation() {
+        let mut a = app(120, 28);
+        let _rx = with_console(&mut a, b"Info: SOL payload already active on another session\r\n");
+        a.console.as_ref().unwrap().end();
+        a.tick(Instant::now());
+        assert!(a.status.contains("another session"), "{}", a.status);
+        press(&mut a, KeyCode::Char('t'));
+        assert!(a.queue.is_empty() && matches!(a.mode, Mode::Normal));
+        unlock(&mut a);
+        press(&mut a, KeyCode::Char('t'));
+        assert!(a.queue.is_empty());
+        press(&mut a, KeyCode::Char('y'));
+        assert_eq!(a.queue[0].args, ["sol", "deactivate"]);
     }
 
     /// An app with two named hosts, "one" and "two".

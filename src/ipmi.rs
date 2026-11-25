@@ -29,6 +29,8 @@ pub enum Screen {
     Fru,
     Control,
     Fan,
+    /// Serial over LAN in a pane. It has its own session instead of fetches.
+    Console,
     /// The host list. It is local: nothing is fetched for it.
     Hosts,
 }
@@ -43,6 +45,7 @@ impl Screen {
             Screen::Control => "Power",
             Screen::Fan => "Fans",
             Screen::Hosts => "Hosts",
+            Screen::Console => "Console",
         }
     }
 
@@ -201,7 +204,7 @@ pub fn fetch(t: &Target, s: Screen) -> Result<String, String> {
         Screen::Fru => r(&["fru", "print"]),
         Screen::Control => r(&["chassis", "power", "status"]),
         Screen::Fan => r(&["raw", "0x30", "0x45", "0x00"]),
-        Screen::Hosts => Ok(String::new()),
+        Screen::Console | Screen::Hosts => Ok(String::new()),
     }
 }
 

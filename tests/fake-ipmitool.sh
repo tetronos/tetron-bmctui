@@ -5,6 +5,14 @@ case "$args" in
 *s3cret*) echo "fake: password leaked in argv" >&2; exit 9 ;;
 esac
 case "$args" in
+*"sol activate"*)
+  # Behaves like a login prompt: answers one line, then ends the session.
+  echo "[SOL Session operational.  Use ~? for help]"
+  printf 'testbox login: '
+  read -r line
+  echo "got: $line"
+  ;;
+*"sol deactivate"*) : ;;
 *"chassis power status"*) echo "Chassis Power is on" ;;
 *"chassis status"*)
   echo "System Power         : on"

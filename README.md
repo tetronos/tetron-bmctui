@@ -9,11 +9,11 @@ Terminal UI for server BMCs (IPMI now, Redfish planned). Part of the tetron suit
 - Screens: Overview, Sensors, Events, Inventory (FRU), Power (power control, identify LED, clear event log, BMC cold reset) and Fans (Supermicro fan mode).
 - Host list: several BMCs in one run, picked from the top bar or the Hosts screen.
 - Mouse and keyboard control. Panes adapt to the terminal width.
-- Serial over LAN, full screen, through `ipmitool sol activate`.
+- Serial console in a pane with scrollback and zoom, through `ipmitool sol activate`. `S` runs it full screen instead.
 
 Fan control uses Supermicro OEM raw commands. Boards differ, so check the mode and the fan speeds after a change. It is not available for other vendors yet.
 
-Not built yet: console in a pane, Redfish, filter, help screen and export.
+Not built yet: Redfish, filter, help screen and export.
 
 ## Requirements
 
@@ -62,19 +62,36 @@ Click screens, rows, buttons and key hints. The wheel scrolls the pane under the
 | `u` | unlock or lock writes |
 | `d` | show or hide details |
 | `r` | refresh |
-| `S` | serial console (needs unlock) |
+| `S` | serial console, full screen (needs unlock) |
 | `q` | quit |
 
 Below 97 columns one pane is shown, and the navigation opens from `[menu]` or with `Tab`.
+
+## Console
+
+Open the Console screen and press `Enter` or click `[ Connect ]`. Connecting needs unlock. After that, all keys go to the host while the console pane has the focus, with no further prompt. Click another pane, or use the command key `Ctrl-]` followed by:
+
+| Key | Function |
+|---|---|
+| `.` | disconnect |
+| `z` | zoom to the whole terminal, or back |
+| `[` | scroll back with arrows, `PgUp`, `PgDn`, `Home`; any other key returns |
+| `Tab` | next pane |
+| `u`, `d`, `1` to `9`, `q`, `?` | lock or unlock, details, host, quit, list commands |
+| `Ctrl-]` | send `Ctrl-]` to the host |
+
+The mouse wheel scrolls back at any time. Mouse events are not sent to the host. The screen is emulated at 80x24, and a smaller pane shows the part around the cursor. `--console-size`, `--scrollback` (default 50000 lines) and `--prefix` change this. `ipmitool` keeps its own escape: `Enter`, `~`, `.` also ends the session.
+
+If another session holds the console, `t` offers to end it, after unlock and confirmation. Not built yet: console log, search, copy, reconnect and an on-screen panel for function keys. This is tested only against the fake `ipmitool`, not yet on a real BMC.
 
 ## Safety
 
 - The program starts read-only. Unlocking asks once and names the host.
 - After unlock, power on, identify LED and fan modes run at once. Soft shutdown, power off, cycle, reset, BMC cold reset and clearing the event log also ask for confirmation. `Enter` alone does not confirm.
-- Writes lock again after 15 idle minutes. `--relock MINUTES` changes this and `0` turns it off.
+- Writes lock again after 15 idle minutes. `--relock MINUTES` changes this and `0` turns it off. **A connected console is not locked by this:** anyone at your terminal can keep typing into the host until you disconnect.
 - Actions and serial console sessions are recorded in `~/.local/state/tetron-bmctui/audit.log`. An action is refused if the record can not be written. Console keystrokes are not recorded.
 - Automatic refresh stops after an apparent login or connection failure, because repeated wrong passwords can lock a BMC account.
-- Text from the BMC is filtered to printable ASCII on screen and in `--dump`. **The full screen serial console is not filtered:** output from the host goes to your terminal as it is.
+- Text from the BMC is filtered to printable ASCII on screen and in `--dump`. The console pane draws only what its terminal emulator parsed. **The full screen serial console (`S`) is not filtered:** output from the host goes to your terminal as it is.
 
 ## Tests
 

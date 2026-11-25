@@ -7,9 +7,9 @@
 //!   97 to 119             navigation, main; details on request
 //!   below 97              one pane; navigation opens as an overlay
 
-use crate::app::{App, Hit, Mode, NAV, NavItem, Pane};
+use crate::app::{App, Hit, Mode, NAV, Pane};
 use crate::canvas::{Canvas, Rect};
-use crate::ipmi;
+use crate::ipmi::{self, Screen};
 use crate::view::{Kind, wrap};
 use crossterm::event::KeyCode;
 
@@ -88,13 +88,6 @@ fn button(app: &mut App, c: &mut Canvas, x: usize, y: usize, label: &str, hit: H
     x + w
 }
 
-fn nav_title(item: NavItem) -> &'static str {
-    match item {
-        NavItem::Console => "Console",
-        NavItem::Page(s) => s.title(),
-    }
-}
-
 /// Text of one host tab. Only a visited host has a known state.
 fn host_tab(app: &App, i: usize) -> String {
     let state = match app.states[i].session_ok {
@@ -146,20 +139,149 @@ fn draw_nav(app: &mut App, c: &mut Canvas, r: Rect) {
     pane(app, c, r, Pane::Nav, "Screens");
     let a = inner(r);
     for (i, item) in NAV.iter().enumerate().take(a.h) {
-        let current = *item == NavItem::Page(app.screen);
-        let text = format!("{} {}", if current { ">" } else { " " }, nav_title(*item));
+        let current = *item == app.screen;
+        let text = format!("{} {}", if current { ">" } else { " " }, item.title());
         // The highlight follows the keyboard while the pane has the focus, and
         // otherwise marks the screen that is open.
         let selected = if app.focus == Pane::Nav { app.nav_cursor == i } else { current };
-        let kind = if selected {
-            Kind::Sel
-        } else if *item == NavItem::Console {
-            Kind::Dim
-        } else {
-            Kind::Normal
-        };
+        let kind = if selected { Kind::Sel } else { Kind::Normal };
         c.line(a.x, a.y + i, a.w, &text, kind);
         app.hits.push((Rect::new(a.x, a.y + i, a.w, 1), Hit::Nav(i)));
+    }
+}
+
+/// Draw the emulator cells into `a`. When the area is smaller than the
+/// emulated screen, the part around the cursor is shown.
+fn draw_console_cells(app: &mut App, c: &mut Canvas, a: Rect) {
+    app.view_rows = a.h.max(1);
+    let Some(console) = &app.console else {
+        let hint = [
+            "Not connected.",
+            "",
+            "Enter or [ Connect ] opens serial over LAN.",
+            "It needs unlock. After that, keys go to the host.",
+        ];
+        for (i, line) in hint.iter().enumerate().take(a.h) {
+            c.text(a.x + 1, a.y + i, a.w.saturating_sub(2), line, Kind::Normal);
+        }
+        if a.h > hint.len() + 1 {
+            button(app, c, a.x + 1, a.y + hint.len() + 1, "[ Connect ]", Hit::Connect, Kind::Head);
+        }
+        return;
+    };
+    let typing = app.typing();
+    let parser = console.screen();
+    let screen = parser.screen();
+    let (rows, cols) = screen.size();
+    let (rows, cols) = (usize::from(rows.get()), usize::from(cols.get()));
+    let (cur_row, cur_col) = screen.cursor_position();
+    let (cur_row, cur_col) = (usize::from(cur_row), usize::from(cur_col));
+    // While scrolled back the top is shown, so the oldest line can be reached.
+    let top = if screen.scrollback() > 0 { 0 } else { (cur_row + 1).saturating_sub(a.h).min(rows.saturating_sub(a.h)) };
+    let left = (cur_col + 1).saturating_sub(a.w).min(cols.saturating_sub(a.w));
+    for y in 0..a.h.min(rows) {
+        for x in 0..a.w.min(cols) {
+            let Some(cell) = screen.cell((top + y) as u16, (left + x) as u16) else { continue };
+            let mut ch = cell.contents().chars().next().unwrap_or(' ');
+            // The second half of a wide character stays empty.
+            if cell.is_wide_continuation() {
+                ch = ' ';
+            }
+            let mut kind = if cell.inverse() {
+                Kind::Sel
+            } else if cell.bold() {
+                Kind::Head
+            } else {
+                Kind::Normal
+            };
+            // The cursor is drawn only where typing would go.
+            if typing && screen.scrollback() == 0 && !screen.hide_cursor() && (top + y, left + x) == (cur_row, cur_col) {
+                kind = if kind == Kind::Sel { Kind::Normal } else { Kind::Sel };
+            }
+            c.term_cell(a.x + x, a.y + y, ch, kind);
+        }
+    }
+}
+
+/// Short state of the console, for pane titles and the status line.
+fn console_state(app: &App) -> String {
+    match &app.console {
+        None => "not connected".into(),
+        Some(console) => {
+            let back = console.scrolled();
+            if back > 0 {
+                format!("SCROLLED {back} back")
+            } else if !console.live() {
+                "ended".into()
+            } else if app.typing() {
+                "typing to host".into()
+            } else {
+                "connected".into()
+            }
+        }
+    }
+}
+
+fn draw_console(app: &mut App, c: &mut Canvas, r: Rect) {
+    let title = format!("Console: {}", console_state(app));
+    pane(app, c, r, Pane::Main, &title);
+    draw_console_cells(app, c, inner(r));
+}
+
+/// The console on the whole terminal. The status line is shown when there is a
+/// spare row for it, and otherwise only while a command is awaited.
+fn draw_zoom(app: &mut App, c: &mut Canvas) {
+    let rows = usize::from(app.console_settings.rows.get());
+    let bar = c.h > rows || app.prefix_pending || app.scroll_mode;
+    let area = Rect::new(0, 0, c.w, if bar { c.h - 1 } else { c.h });
+    app.hits.push((area, Hit::Pane(Pane::Main)));
+    draw_console_cells(app, c, area);
+    if bar {
+        let y = c.h - 1;
+        c.line(0, y, c.w, "", Kind::Head);
+        let x = button(app, c, 0, y, "[unzoom]", Hit::Command('z'), Kind::Head) + 1;
+        let text = format!("{} | {} | {} then ? commands", app.t.label(), console_state(app), app.prefix_name());
+        c.text(x, y, c.w.saturating_sub(x), &text, Kind::Head);
+    }
+}
+
+/// Details of the console: session facts and its buttons.
+fn draw_console_details(app: &mut App, c: &mut Canvas, r: Rect) {
+    pane(app, c, r, Pane::Details, "Details");
+    let a = inner(r);
+    let width = a.w.saturating_sub(2);
+    let s = app.console_settings;
+    let mut lines = vec![
+        ("state".to_string(), Kind::Dim),
+        (console_state(app), Kind::Normal),
+        ("size".to_string(), Kind::Dim),
+        (format!("{}x{}", s.cols, s.rows), Kind::Normal),
+        ("command key".to_string(), Kind::Dim),
+        (app.prefix_name(), Kind::Normal),
+        (String::new(), Kind::Normal),
+    ];
+    if app.console_live() {
+        lines.extend(wrap("Keys go to the host while the console pane has the focus.", width).into_iter().map(|l| (l, Kind::Warn)));
+    }
+    app.detail_rows = a.h.max(1);
+    app.detail_len = 0;
+    let mut buttons = vec![];
+    if app.console_live() {
+        buttons.push(("[ Disconnect ]", Hit::Command('.')));
+        buttons.push(("[ Zoom ]", Hit::Command('z')));
+        buttons.push(("[ Scroll back ]", Hit::Command('[')));
+    } else {
+        buttons.push(("[ Connect ]", Hit::Connect));
+        if app.console.as_ref().is_some_and(|c| c.busy_elsewhere()) {
+            buttons.push(("[ Take over ]", Hit::Key(KeyCode::Char('t'))));
+        }
+    }
+    for (row, (text, kind)) in lines.iter().take(a.h.saturating_sub(buttons.len())).enumerate() {
+        c.text(a.x + 1, a.y + row, width, text, *kind);
+    }
+    let first = a.h.saturating_sub(buttons.len());
+    for (i, (label, hit)) in buttons.into_iter().enumerate().take(a.h) {
+        button(app, c, a.x + 1, a.y + first + i, label, hit, Kind::Head);
     }
 }
 
@@ -190,6 +312,9 @@ fn draw_main(app: &mut App, c: &mut Canvas, r: Rect) {
 }
 
 fn draw_details(app: &mut App, c: &mut Canvas, r: Rect) {
+    if app.screen == Screen::Console {
+        return draw_console_details(app, c, r);
+    }
     pane(app, c, r, Pane::Details, "Details");
     let a = inner(r);
     let width = a.w.saturating_sub(2);
@@ -214,12 +339,38 @@ fn status_line(app: &App, c: &mut Canvas, y: usize) {
     let (lock, kind) = if app.unlocked { (" WRITES UNLOCKED ", Kind::Warn) } else { (" read-only ", Kind::Head) };
     c.text(0, y, c.w, lock, kind);
     let rest = format!("| {} | {}", app.t.label(), app.status);
-    c.text(lock.len(), y, c.w, &rest, if app.unlocked { Kind::Warn } else { Kind::Normal });
+    let mut x = lock.len();
+    // A live console stays writable after a relock, so it is shown separately.
+    if app.console_live() {
+        let mark = " CONSOLE OPEN ";
+        c.text(x, y, c.w.saturating_sub(x), mark, Kind::Sel);
+        x += mark.len();
+    }
+    c.text(x, y, c.w.saturating_sub(x), &rest, if app.unlocked { Kind::Warn } else { Kind::Normal });
 }
 
 /// Bottom row: key hints. Each one can be clicked.
 fn key_hints(app: &mut App, c: &mut Canvas, y: usize) {
+    // While keys go to the host, only commands behind the prefix work.
+    if app.screen == Screen::Console && (app.typing() || app.prefix_pending || app.scroll_mode) {
+        let lead = if app.scroll_mode {
+            "arrows PgUp PgDn Home scroll, other keys return".to_string()
+        } else {
+            format!("{} then:", app.prefix_name())
+        };
+        c.text(1, y, c.w.saturating_sub(1), &lead, Kind::Dim);
+        let mut x = lead.len() + 3;
+        if !app.scroll_mode {
+            for (label, cmd) in [(". disconnect", '.'), ("z zoom", 'z'), ("[ scroll", '['), ("Tab pane", '\t'), ("? help", '?')] {
+                x = button(app, c, x, y, label, Hit::Command(cmd), Kind::Dim) + 2;
+            }
+        }
+        return;
+    }
     let mut hints = vec![("Tab pane", KeyCode::Tab)];
+    if app.screen == Screen::Console && !app.console_live() {
+        hints.push(("Enter connect", KeyCode::Enter));
+    }
     if !app.menu().is_empty() {
         hints.push(("Enter run", KeyCode::Enter));
     }
@@ -239,9 +390,16 @@ fn key_hints(app: &mut App, c: &mut Canvas, y: usize) {
 fn dialog(app: &mut App, c: &mut Canvas) {
     let (title, text, ok, anchor) = match &app.mode {
         Mode::Normal => return,
-        Mode::Unlock { anchor } => (
+        Mode::Unlock { anchor, connect } => (
             "Unlock",
-            vec![format!("Unlock writes on {}?", app.t.describe()), "Power, fan, event log and console input become possible.".to_string()],
+            vec![
+                format!("Unlock writes on {}?", app.t.describe()),
+                if *connect {
+                    "The console opens and your keys are typed into the host, until you disconnect.".to_string()
+                } else {
+                    "Power, fan, event log and console input become possible.".to_string()
+                },
+            ],
             "[ Unlock (y) ]",
             *anchor,
         ),
@@ -306,12 +464,21 @@ pub fn draw(app: &mut App, w: usize, h: usize) -> Canvas {
         return c;
     }
     app.fix_focus();
+    if app.zoom && app.screen == Screen::Console && app.console.is_some() {
+        draw_zoom(app, &mut c);
+        dialog(app, &mut c);
+        return c;
+    }
     let l = layout(w, h, app.details_visible(), app.focus == Pane::Nav);
     host_bar(app, &mut c);
     // Right to left, so the shared border column belongs to the pane on the
     // right of it, and the navigation overlay is drawn last.
     if let Some(r) = l.main {
-        draw_main(app, &mut c, r);
+        if app.screen == Screen::Console {
+            draw_console(app, &mut c, r);
+        } else {
+            draw_main(app, &mut c, r);
+        }
     }
     if let Some(r) = l.details {
         draw_details(app, &mut c, r);

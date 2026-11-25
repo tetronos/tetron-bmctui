@@ -2,6 +2,7 @@
 
 mod app;
 mod canvas;
+mod console;
 mod hosts;
 mod ipmi;
 mod ui;
@@ -16,8 +17,10 @@ use crossterm::{
 };
 use ipmi::{Action, Screen, Target};
 use std::io::{self, Write};
+use std::num::NonZeroU16;
 use std::process::Command;
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 /// Default idle time before writes lock again, in minutes.
@@ -37,13 +40,18 @@ usage: tetron-bmctui [-H host] [-U user] [-I iface] [--pass-file FILE]
   --select NAME     start with this host of the list
   --ipmitool BIN    ipmitool binary (default: ipmitool)
   --relock MINUTES  lock writes again after this idle time (default 15, 0 never)
+  --console-size CxR  emulated console size (default 80x24)
+  --scrollback N    console lines kept (default 50000, max 200000)
+  --prefix CHAR     console command key is Ctrl-CHAR (default ])
   --dump SCREEN     print dash|sensors|sel|fru|control|fan|hosts as text and exit
 
 The password is never accepted on the command line.
 Mouse: click screens, rows, buttons and key hints. The wheel scrolls the pane
 under the pointer. Hold Shift to select text with the terminal.
 keys: 1-9 host, Tab pane, arrows or j/k move, Enter open or run, u unlock or lock,
-      r refresh, d details, S serial console, q quit.
+      r refresh, d details, S serial console full screen, q quit.
+Console: Enter connects (needs unlock). Then all keys go to the host, except
+Ctrl-] followed by a command; Ctrl-] then ? lists them.
 Harmless actions run at once after unlock. Sensitive ones ask for confirmation.
 Writes are logged in ~/.local/state/tetron-bmctui/audit.log.";
 
@@ -53,6 +61,26 @@ struct Opts {
     current: usize,
     dump: Option<Screen>,
     relock: Option<Duration>,
+    console: console::Settings,
+    prefix: u8,
+}
+
+/// "80x24" -> (80, 24), within sizes a console can sensibly have.
+fn parse_size(s: &str) -> Option<(NonZeroU16, NonZeroU16)> {
+    let (c, r) = s.split_once('x')?;
+    let (c, r): (u16, u16) = (c.parse().ok()?, r.parse().ok()?);
+    if !(40..=500).contains(&c) || !(10..=200).contains(&r) {
+        return None;
+    }
+    Some((NonZeroU16::new(c)?, NonZeroU16::new(r)?))
+}
+
+/// The command key must be a Ctrl combination that terminals can tell apart
+/// from Tab, Enter, Backspace and Esc.
+fn parse_prefix(s: &str) -> Option<u8> {
+    let mut it = s.chars();
+    let (c, None) = (it.next()?, it.next()) else { return None };
+    console::ctrl_byte(c).filter(|b| !c.is_ascii_digit() && ![0, 8, 9, 10, 13, 27].contains(b))
 }
 
 fn parse_args() -> Result<Opts, String> {
@@ -69,6 +97,8 @@ fn parse_args() -> Result<Opts, String> {
     // -U, -I and --pass-file describe the single host of the command line.
     let mut single_flags = false;
     let mut minutes = RELOCK_MINUTES;
+    let mut console = console::Settings::default();
+    let mut prefix = app::DEFAULT_PREFIX;
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
         let mut val = |name: &str| it.next().ok_or(format!("{name} needs a value"));
@@ -98,6 +128,9 @@ fn parse_args() -> Result<Opts, String> {
             "--ipmitool" => t.bin = val("--ipmitool")?,
             // Idle relock time. 0 turns it off.
             "--relock" => minutes = val("--relock")?.parse().ok().filter(|m| *m <= 100_000).ok_or("--relock needs a number of minutes")?,
+            "--console-size" => (console.cols, console.rows) = parse_size(&val("--console-size")?).ok_or("--console-size needs COLSxROWS, 40x10 to 500x200")?,
+            "--scrollback" => console.scrollback = val("--scrollback")?.parse().ok().filter(|n| *n <= 200_000).ok_or("--scrollback needs a number up to 200000")?,
+            "--prefix" => prefix = parse_prefix(&val("--prefix")?).ok_or("--prefix needs one of a-z (not h i j m) or \\ ] ^ _")?,
             "--dump" => {
                 let n = val("--dump")?;
                 dump = Some(Screen::from_name(&n).ok_or(format!("unknown screen {n}"))?);
@@ -139,7 +172,7 @@ fn parse_args() -> Result<Opts, String> {
             (vec![t], 0)
         }
     };
-    Ok(Opts { hosts, current, dump, relock })
+    Ok(Opts { hosts, current, dump, relock, console, prefix })
 }
 
 /// Raw mode, alternate screen and mouse capture. Dropping the guard restores
@@ -195,6 +228,14 @@ fn execute_action(app: &mut App, tx: &Sender<Msg>, a: Action) {
     });
 }
 
+/// Record and start the session of the Console pane.
+fn connect_console(app: &mut App) {
+    let r = ipmi::audit(&app.t.describe(), "sol activate (pane)")
+        .map_err(|e| format!("refused, cannot write the audit log: {e}"))
+        .and_then(|()| console::Console::spawn(&app.t, &app.console_settings).map_err(|e| format!("{}: {e}", app.t.bin)));
+    app.connected(r);
+}
+
 /// Leave the UI and hand the terminal to `ipmitool sol activate`.
 fn run_sol(t: &Target) -> io::Result<()> {
     term_restore();
@@ -220,9 +261,14 @@ fn redraw(app: &mut App, out: &mut impl Write) -> io::Result<()> {
     execute!(out, terminal::EndSynchronizedUpdate)
 }
 
-fn run(hosts: Vec<Target>, current: usize, relock: Option<Duration>) -> io::Result<()> {
+fn run(opts: Opts) -> io::Result<()> {
+    let Opts { hosts, current, relock, console, prefix, .. } = opts;
     let (tx, rx): (Sender<Msg>, Receiver<Msg>) = mpsc::channel();
     let mut app = App::new(hosts, current, relock, tx.clone());
+    app.console_settings = console;
+    app.prefix = prefix;
+    // Threads that are ending console sessions.
+    let mut closers: Vec<JoinHandle<()>> = vec![];
     app.start_vendor();
     app.refresh(Screen::Dash);
     let _g = TermGuard::enter()?;
@@ -233,7 +279,9 @@ fn run(hosts: Vec<Target>, current: usize, relock: Option<Duration>) -> io::Resu
         // The idle check comes before input: a key pressed after the limit must
         // find the writes locked.
         dirty |= app.tick(Instant::now());
-        if event::poll(Duration::from_millis(200))? {
+        // Echo of typed keys has to show quickly while a console is open.
+        let wait = if app.console_live() { 20 } else { 200 };
+        if event::poll(Duration::from_millis(wait))? {
             dirty |= app.tick(Instant::now());
             // One event per frame: the clickable regions always belong to what
             // is on screen. Pointer movement does not cause a redraw.
@@ -255,7 +303,18 @@ fn run(hosts: Vec<Target>, current: usize, relock: Option<Duration>) -> io::Resu
             execute_action(&mut app, &tx, a);
             dirty = true;
         }
-        if app.want_sol {
+        for c in std::mem::take(&mut app.closing) {
+            closers.push(std::thread::spawn(move || c.close()));
+        }
+        closers.retain(|c| !c.is_finished());
+        // A new session waits for the old one: its deactivate would otherwise
+        // end the new session.
+        if app.want_connect && closers.is_empty() {
+            app.want_connect = false;
+            connect_console(&mut app);
+            dirty = true;
+        }
+        if app.want_sol && closers.is_empty() {
             app.want_sol = false;
             run_sol(&app.t)?;
             // Time spent in the console does not count as idle.
@@ -265,6 +324,18 @@ fn run(hosts: Vec<Target>, current: usize, relock: Option<Duration>) -> io::Resu
         if dirty {
             redraw(&mut app, &mut out)?;
         }
+    }
+    // Leave no session behind on the BMC.
+    app.disconnect();
+    for c in std::mem::take(&mut app.closing) {
+        closers.push(std::thread::spawn(move || c.close()));
+    }
+    drop(_g);
+    if !closers.is_empty() {
+        println!("closing the console session ...");
+    }
+    for c in closers {
+        let _ = c.join();
     }
     Ok(())
 }
@@ -288,8 +359,8 @@ fn main() {
             std::process::exit(2);
         }
         Ok(Opts { hosts, current, dump: Some(s), .. }) => std::process::exit(dump(&hosts, current, s)),
-        Ok(Opts { hosts, current, dump: None, relock }) => {
-            if let Err(e) = run(hosts, current, relock) {
+        Ok(opts) => {
+            if let Err(e) = run(opts) {
                 eprintln!("tetron-bmctui: {e}");
                 std::process::exit(1);
             }

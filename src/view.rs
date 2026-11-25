@@ -287,6 +287,8 @@ pub fn render(s: Screen, c: &Ctx) -> Vec<Line> {
             .lines()
             .map(|l| (l.to_string(), if l.starts_with("FRU Device Description") { Kind::Head } else { Kind::Normal }))
             .collect(),
+        // Drawn from the emulator, not from fetched text.
+        Screen::Console => vec![],
         // Handled above.
         Screen::Control | Screen::Fan => menu_screen(s, c),
         Screen::Hosts => hosts_screen(c),
