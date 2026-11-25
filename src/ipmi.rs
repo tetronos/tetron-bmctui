@@ -30,16 +30,15 @@ pub enum Screen {
 }
 
 impl Screen {
-    pub const ALL: [Screen; 6] = [Screen::Dash, Screen::Sensors, Screen::Sel, Screen::Fru, Screen::Control, Screen::Fan];
 
     pub fn title(self) -> &'static str {
         match self {
-            Screen::Dash => "Dash",
+            Screen::Dash => "Overview",
             Screen::Sensors => "Sensors",
             Screen::Sel => "Events",
-            Screen::Fru => "FRU",
-            Screen::Control => "Control",
-            Screen::Fan => "Fan",
+            Screen::Fru => "Inventory",
+            Screen::Control => "Power",
+            Screen::Fan => "Fans",
         }
     }
 
@@ -58,9 +57,9 @@ impl Screen {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Risk {
-    /// Unlock plus a y confirmation.
+    /// Runs at once after unlock.
     Low,
-    /// Unlock plus typing the host name.
+    /// After unlock, also needs a confirmation dialog naming host and action.
     High,
 }
 
@@ -88,7 +87,7 @@ pub fn control_actions() -> Vec<Action> {
     ]
 }
 
-/// Supermicro X9/X10 fan mode: raw 0x30 0x45 0x01 <mode>.
+/// Supermicro OEM fan mode: raw 0x30 0x45 0x01 <mode>.
 pub fn fan_actions() -> Vec<Action> {
     let m = |label: &str, b: &str| act(label, &["raw", "0x30", "0x45", "0x01", b], Risk::Low);
     vec![m("Standard", "0x00"), m("Full speed", "0x01"), m("Optimal", "0x02"), m("Heavy IO", "0x04")]
