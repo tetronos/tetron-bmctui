@@ -106,7 +106,7 @@ The "Next boot" actions run `ipmitool chassis bootdev`, which applies to one boo
 ## Safety
 
 - The program starts read-only. Unlocking asks once and names the host.
-- After unlock, power on, identify LED and fan modes run at once. Soft shutdown, power off, cycle, reset, BMC cold reset, clearing the event log and the next boot actions also ask for confirmation. `Enter` alone does not confirm.
+- After unlock, only the identify LED and fan modes run at once. Power on, soft shutdown, power off, cycle, reset, BMC cold reset, clearing the event log and the next boot actions also ask for confirmation. `Enter` alone does not confirm.
 - Writes lock again after 15 idle minutes. `--relock MINUTES` changes this and `0` turns it off. **A connected console is not locked by this:** anyone at your terminal can keep typing into the host until you disconnect.
 - Actions and serial console sessions are recorded in `~/.local/state/tetron-bmctui/audit.log`. An action is refused if the record can not be written. Console keystrokes are not recorded.
 - Automatic refresh stops after an apparent login or connection failure, because repeated wrong passwords can lock a BMC account.

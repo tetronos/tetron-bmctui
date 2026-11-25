@@ -84,7 +84,7 @@ fn act(label: &str, args: &[&str], risk: Risk) -> Action {
 
 pub fn control_actions() -> Vec<Action> {
     vec![
-        act("Power on", &["chassis", "power", "on"], Risk::Low),
+        act("Power on", &["chassis", "power", "on"], Risk::High),
         act("Power soft shutdown (ACPI)", &["chassis", "power", "soft"], Risk::High),
         act("Power off (hard)", &["chassis", "power", "off"], Risk::High),
         act("Power cycle", &["chassis", "power", "cycle"], Risk::High),

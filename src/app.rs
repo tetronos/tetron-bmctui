@@ -1244,9 +1244,10 @@ mod tests {
         let mut a = app(120, 28);
         open_power(&mut a);
         unlock(&mut a);
-        press(&mut a, KeyCode::Enter); // first item: Power on
+        a.cursor = a.menu().iter().position(|x| x.label.starts_with("Identify")).unwrap();
+        press(&mut a, KeyCode::Enter);
         assert_eq!(a.queue.len(), 1);
-        assert_eq!(a.queue[0].label, "Power on");
+        assert_eq!(a.queue[0].args, ["chassis", "identify", "15"]);
     }
 
     #[test]
@@ -1525,7 +1526,9 @@ mod tests {
         let mut a = two_hosts();
         open_power(&mut a);
         unlock(&mut a);
-        press(&mut a, KeyCode::Enter); // queued for host one
+        press(&mut a, KeyCode::Enter);
+        press(&mut a, KeyCode::Char('y')); // queued for host one
+        assert_eq!(a.queue.len(), 1);
         a.data.insert(Screen::Fru, Ok("fru of one".into()));
         a.vendor = Some(ipmi::SUPERMICRO_ID);
         let old = a.epoch;
@@ -1702,7 +1705,13 @@ mod tests {
         assert_eq!(a.queue[0].args, ["chassis", "power", "off"]);
         click(&mut a, Hit::Power);
         click(&mut a, Hit::PowerItem(0));
-        assert!(matches!(a.mode, Mode::Normal) && a.queue.len() == 2, "power on runs at once");
+        assert!(matches!(a.mode, Mode::Confirm { .. }) && a.queue.len() == 1, "power on asks too");
+        click(&mut a, Hit::DialogOk);
+        assert_eq!(a.queue[1].args, ["chassis", "power", "on"]);
+        let led = a.power_actions().iter().position(|x| x.label.starts_with("Identify")).unwrap();
+        click(&mut a, Hit::Power);
+        click(&mut a, Hit::PowerItem(led));
+        assert!(matches!(a.mode, Mode::Normal) && a.queue.len() == 3, "the LED runs at once");
         assert!(sent(&rx).is_empty());
     }
 
