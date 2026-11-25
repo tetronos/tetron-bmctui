@@ -54,6 +54,9 @@ pub enum Hit {
     Run,
     /// A host tab in the top bar, by index in `App::hosts`.
     Host(usize),
+    /// The power button in the top bar, and an entry of the power menu.
+    Power,
+    PowerItem(usize),
     /// Console buttons: connect, and the commands that otherwise follow the
     /// prefix key.
     Connect,
@@ -72,12 +75,25 @@ pub enum Hit {
 #[derive(Clone, Debug)]
 pub enum Mode {
     Normal,
-    /// "Unlock writes on HOST?" With `connect` the console is opened next.
-    Unlock { anchor: Option<(usize, usize)>, connect: bool },
+    /// "Unlock writes on HOST?"
+    Unlock { anchor: Option<(usize, usize)>, then: Then },
+    /// The power menu, on top of the open screen.
+    Power,
     /// The list of keys.
     Help,
     /// "Run ACTION on HOST?" for sensitive actions.
-    Confirm { act: Action, anchor: Option<(usize, usize)> },
+    /// With `from_power`, cancelling goes back to the power menu.
+    Confirm { act: Action, anchor: Option<(usize, usize)>, from_power: bool },
+}
+
+/// What follows the unlock dialog. Unlocking never runs an action by itself.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Then {
+    Nothing,
+    /// Open the console.
+    Connect,
+    /// Back to the power menu, also when cancelled.
+    PowerMenu,
 }
 
 /// Results coming back from worker threads. Each carries the `epoch` it was
@@ -154,6 +170,8 @@ pub struct App {
     /// The filter is being typed.
     pub filtering: bool,
     pub help_scroll: usize,
+    /// Selected entry of the power menu.
+    pub power_cursor: usize,
     /// The main loop writes the open screen to a file when set.
     pub want_export: bool,
     pub efi_boot: bool,
@@ -211,6 +229,7 @@ impl App {
             filter: String::new(),
             filtering: false,
             help_scroll: 0,
+            power_cursor: 0,
             want_export: false,
             efi_boot: false,
             quit: false,
@@ -374,6 +393,82 @@ impl App {
         }
     }
 
+    // ----- power menu -------------------------------------------------------
+
+    pub fn power_actions(&self) -> Vec<Action> {
+        view::actions(Screen::Control, self.vendor, self.efi_boot)
+    }
+
+    /// The power state for the menu, as one line.
+    pub fn power_state(&self) -> view::Line {
+        view::power_state(self.data.get(&Screen::Control), self.loading.contains(&Screen::Control))
+    }
+
+    /// Read the power state again. After a login failure only `r` retries, as
+    /// on the other screens.
+    fn read_power(&mut self) {
+        if !self.states[self.current].halt_auto {
+            // An old answer must not pass for the current state.
+            self.data.remove(&Screen::Control);
+            self.refresh(Screen::Control);
+        }
+    }
+
+    pub fn open_power_menu(&mut self) {
+        self.prefix_pending = false;
+        self.filtering = false;
+        self.power_cursor = 0;
+        self.mode = Mode::Power;
+        self.read_power();
+    }
+
+    /// Close the menu. On the console the keys go to the host again.
+    fn leave_power_menu(&mut self) {
+        self.mode = Mode::Normal;
+        if self.screen == Screen::Console && self.pane_cycle().contains(&Pane::Main) {
+            self.focus = Pane::Main;
+            self.scroll_mode = false;
+        }
+    }
+
+    /// Choose an entry of the power menu. The rules are those of the Power
+    /// screen.
+    fn pick_power(&mut self, i: usize) {
+        let Some(a) = self.power_actions().get(i).cloned() else { return };
+        self.power_cursor = i;
+        if !self.unlocked {
+            self.mode = Mode::Unlock { anchor: self.pointer, then: Then::PowerMenu };
+            return;
+        }
+        match a.risk {
+            Risk::Low => {
+                self.queue.push(a);
+                self.leave_power_menu();
+            }
+            Risk::High => self.mode = Mode::Confirm { act: a, anchor: self.pointer, from_power: true },
+        }
+    }
+
+    fn power_menu_key(&mut self, code: KeyCode) {
+        let last = self.power_actions().len().saturating_sub(1);
+        match code {
+            KeyCode::Esc => {
+                self.leave_power_menu();
+                self.status = "power menu closed, nothing was run".into();
+            }
+            KeyCode::Down | KeyCode::Char('j') => self.power_cursor = (self.power_cursor + 1).min(last),
+            KeyCode::Up | KeyCode::Char('k') => self.power_cursor = self.power_cursor.saturating_sub(1),
+            KeyCode::Home | KeyCode::Char('g') => self.power_cursor = 0,
+            KeyCode::End | KeyCode::Char('G') => self.power_cursor = last,
+            KeyCode::Enter => self.pick_power(self.power_cursor),
+            KeyCode::Char('r') => {
+                self.states[self.current].halt_auto = false;
+                self.read_power();
+            }
+            _ => {}
+        }
+    }
+
     // ----- console ----------------------------------------------------------
 
     pub fn console_live(&self) -> bool {
@@ -393,7 +488,7 @@ impl App {
             return;
         }
         if !self.unlocked {
-            self.mode = Mode::Unlock { anchor: self.pointer, connect: true };
+            self.mode = Mode::Unlock { anchor: self.pointer, then: Then::Connect };
             return;
         }
         self.want_connect = true;
@@ -445,7 +540,7 @@ impl App {
             args: vec!["sol".into(), "deactivate".into()],
             risk: Risk::High,
         };
-        self.mode = Mode::Confirm { act, anchor: self.pointer };
+        self.mode = Mode::Confirm { act, anchor: self.pointer, from_power: false };
     }
 
     fn scroll_console(&mut self, delta: isize) {
@@ -469,6 +564,7 @@ impl App {
                 self.disconnect();
                 self.status = "console disconnected".into();
             }
+            'p' => self.open_power_menu(),
             'z' => {
                 self.zoom = !self.zoom;
                 if self.zoom {
@@ -790,7 +886,7 @@ impl App {
         if self.unlocked {
             self.lock("locked: read-only");
         } else {
-            self.mode = Mode::Unlock { anchor: self.pointer, connect: false };
+            self.mode = Mode::Unlock { anchor: self.pointer, then: Then::Nothing };
         }
     }
 
@@ -812,7 +908,7 @@ impl App {
         }
         match a.risk {
             Risk::Low => self.queue.push(a),
-            Risk::High => self.mode = Mode::Confirm { act: a, anchor: self.pointer },
+            Risk::High => self.mode = Mode::Confirm { act: a, anchor: self.pointer, from_power: false },
         }
     }
 
@@ -828,27 +924,41 @@ impl App {
 
     fn dialog_ok(&mut self) {
         match std::mem::replace(&mut self.mode, Mode::Normal) {
-            Mode::Unlock { connect, .. } => {
+            Mode::Unlock { then, .. } => {
                 self.unlocked = true;
                 self.status = "writes unlocked".into();
-                self.want_connect |= connect;
+                match then {
+                    Then::Nothing => {}
+                    Then::Connect => self.want_connect = true,
+                    // The entry stays selected and has to be chosen again.
+                    Then::PowerMenu => self.mode = Mode::Power,
+                }
             }
-            Mode::Confirm { act, .. } => {
+            Mode::Confirm { act, from_power, .. } => {
                 if self.unlocked {
                     self.queue.push(act);
                 }
+                if from_power {
+                    self.leave_power_menu();
+                }
             }
             Mode::Help => self.mode = Mode::Help,
+            Mode::Power => self.mode = Mode::Power,
             Mode::Normal => {}
         }
     }
 
     fn dialog_cancel(&mut self) {
-        if matches!(self.mode, Mode::Help) {
-            self.mode = Mode::Normal;
-            return;
-        }
-        self.mode = Mode::Normal;
+        self.mode = match self.mode {
+            Mode::Help => {
+                self.mode = Mode::Normal;
+                return;
+            }
+            Mode::Power => return self.power_menu_key(KeyCode::Esc),
+            // One step back, to the menu the dialog was opened from.
+            Mode::Confirm { from_power: true, .. } | Mode::Unlock { then: Then::PowerMenu, .. } => Mode::Power,
+            _ => Mode::Normal,
+        };
         self.status = "cancelled, nothing was run".into();
     }
 
@@ -879,6 +989,9 @@ impl App {
             }
             return;
         }
+        if matches!(self.mode, Mode::Power) {
+            return self.power_menu_key(code);
+        }
         // A dialog takes all other keys. Enter alone deliberately does nothing.
         if !matches!(self.mode, Mode::Normal) {
             match code {
@@ -896,6 +1009,7 @@ impl App {
             KeyCode::Char('?') => self.open_help(),
             KeyCode::Char('/') => self.start_filter(),
             KeyCode::Char('e') => self.export(),
+            KeyCode::Char('p') => self.open_power_menu(),
             // Esc first removes a filter that is in effect.
             KeyCode::Esc if !self.filter.is_empty() => self.clear_filter(),
             KeyCode::Char('q') => self.quit = true,
@@ -981,6 +1095,7 @@ impl App {
         // With a dialog open only its two buttons react.
         if !matches!(self.mode, Mode::Normal) {
             match h {
+                Hit::PowerItem(i) if matches!(self.mode, Mode::Power) => self.pick_power(i),
                 Hit::DialogOk => self.dialog_ok(),
                 Hit::DialogCancel => self.dialog_cancel(),
                 _ => {}
@@ -1016,6 +1131,9 @@ impl App {
                 }
             }
             Hit::Host(i) => self.switch_host(i),
+            Hit::Power => self.open_power_menu(),
+            // Only drawn while the menu is open, which is handled above.
+            Hit::PowerItem(_) => {}
             Hit::Run => self.pick(),
             Hit::Key(k) => self.app_key(k, KeyModifiers::NONE),
             Hit::Connect => self.connect(),
@@ -1029,6 +1147,11 @@ impl App {
     fn wheel(&mut self, x: usize, y: usize, delta: isize) {
         if matches!(self.mode, Mode::Help) {
             self.help_scroll = self.help_scroll.saturating_add_signed(delta);
+            return;
+        }
+        if matches!(self.mode, Mode::Power) {
+            let last = self.power_actions().len().saturating_sub(1);
+            self.power_cursor = self.power_cursor.saturating_add_signed(delta.signum()).min(last);
             return;
         }
         if !matches!(self.mode, Mode::Normal) {
@@ -1154,7 +1277,7 @@ mod tests {
             // drawn under the click that opened the dialog.
             for y in 0..h {
                 for x in 0..w {
-                    a.mode = Mode::Confirm { act: ipmi::control_actions()[2].clone(), anchor: Some((x, y)) };
+                    a.mode = Mode::Confirm { act: ipmi::control_actions()[2].clone(), anchor: Some((x, y)), from_power: false };
                     ui::draw(&mut a, w, h);
                     assert!(a.hits.iter().any(|(_, k)| *k == Hit::DialogOk), "button missing at {w}x{h}");
                     assert_ne!(a.hit_at(x, y), Some(Hit::DialogOk), "{w}x{h} pointer {x},{y}");
@@ -1228,7 +1351,7 @@ mod tests {
         let mut a = app(120, 28);
         click(&mut a, Hit::Nav(0));
         press(&mut a, KeyCode::Enter);
-        assert!(matches!(a.mode, Mode::Unlock { connect: true, .. }) && !a.want_connect);
+        assert!(matches!(a.mode, Mode::Unlock { then: Then::Connect, .. }) && !a.want_connect);
         press(&mut a, KeyCode::Enter);
         assert!(!a.want_connect, "Enter alone must not unlock");
         press(&mut a, KeyCode::Esc);
@@ -1339,7 +1462,7 @@ mod tests {
         assert_eq!(a.current, 1);
         assert!(a.console.is_none() && a.closing.len() == 1);
         press(&mut a, KeyCode::Enter);
-        assert!(matches!(a.mode, Mode::Unlock { connect: true, .. }), "the new host has its own gate");
+        assert!(matches!(a.mode, Mode::Unlock { then: Then::Connect, .. }), "the new host has its own gate");
         assert!(sent(&rx).is_empty());
     }
 
@@ -1525,6 +1648,90 @@ mod tests {
             let c = ui::draw(&mut a, w, h);
             assert!(a.hits.iter().any(|(_, k)| *k == Hit::DialogCancel));
             assert!((0..h).any(|y| c.row(y).contains("audit log")), "the end is reachable at {w}x{h}");
+        }
+    }
+
+    #[test]
+    fn power_menu_over_the_console() {
+        let mut a = app(120, 28);
+        a.unlocked = true;
+        let rx = with_console(&mut a, b"boot messages");
+        ctrl(&mut a, '5');
+        press(&mut a, KeyCode::Char('p'));
+        assert!(matches!(a.mode, Mode::Power) && a.screen == Screen::Console && a.console_live());
+        // Nothing reaches the host while the menu or its dialog is open.
+        press(&mut a, KeyCode::Char('x'));
+        press(&mut a, KeyCode::Down);
+        press(&mut a, KeyCode::Down); // Power off (hard)
+        press(&mut a, KeyCode::Enter);
+        press(&mut a, KeyCode::Enter);
+        assert!(a.queue.is_empty(), "Enter alone must not confirm");
+        press(&mut a, KeyCode::Esc);
+        assert!(matches!(a.mode, Mode::Power) && a.power_cursor == 2, "back to the menu");
+        press(&mut a, KeyCode::Esc);
+        assert!(matches!(a.mode, Mode::Normal) && a.queue.is_empty());
+        assert!(sent(&rx).is_empty());
+        // Closed: Esc belongs to the host again.
+        press(&mut a, KeyCode::Esc);
+        assert_eq!(sent(&rx), [0x1b]);
+    }
+
+    #[test]
+    fn power_menu_by_mouse() {
+        let mut a = app(120, 28);
+        let rx = with_console(&mut a, b"");
+        a.focus = Pane::Details;
+        ui::draw(&mut a, 120, 28);
+        click(&mut a, Hit::Power);
+        click(&mut a, Hit::DialogCancel);
+        assert!(matches!(a.mode, Mode::Normal));
+        click(&mut a, Hit::Power);
+        // Clicks outside the menu do nothing.
+        click_at(&mut a, 1, 3);
+        assert!(matches!(a.mode, Mode::Power));
+        // Locked: unlocking returns to the menu and runs nothing.
+        click(&mut a, Hit::PowerItem(0));
+        click(&mut a, Hit::DialogOk);
+        assert!(matches!(a.mode, Mode::Power) && a.unlocked && a.queue.is_empty() && !a.want_connect);
+        click(&mut a, Hit::PowerItem(2));
+        click(&mut a, Hit::DialogCancel);
+        assert!(matches!(a.mode, Mode::Power));
+        click(&mut a, Hit::PowerItem(2));
+        click(&mut a, Hit::DialogOk);
+        assert!(matches!(a.mode, Mode::Normal) && a.focus == Pane::Main && a.typing());
+        assert_eq!(a.queue[0].args, ["chassis", "power", "off"]);
+        click(&mut a, Hit::Power);
+        click(&mut a, Hit::PowerItem(0));
+        assert!(matches!(a.mode, Mode::Normal) && a.queue.len() == 2, "power on runs at once");
+        assert!(sent(&rx).is_empty());
+    }
+
+    #[test]
+    fn power_menu_fits_and_stays_reachable() {
+        let mut a = two_hosts();
+        let _rx = with_console(&mut a, b"");
+        for (w, h) in [(40, 12), (80, 24), (130, 36)] {
+            ui::draw(&mut a, w, h);
+            assert!(a.hits.iter().any(|(_, k)| *k == Hit::Power), "button at {w}x{h}");
+            a.open_power_menu();
+            let last = a.power_actions().len() - 1;
+            for _ in 0..last {
+                a.key(KeyCode::Down, KeyModifiers::NONE);
+            }
+            ui::draw(&mut a, w, h);
+            assert!(a.hits.iter().any(|(_, k)| *k == Hit::PowerItem(last)), "last entry at {w}x{h}");
+            assert!(a.hits.iter().any(|(_, k)| *k == Hit::DialogCancel));
+            a.mode = Mode::Normal;
+        }
+        // Zoom has no top bar, so its own line carries the button.
+        a.command('z');
+        ui::draw(&mut a, 120, 40);
+        assert!(a.hits.iter().any(|(_, k)| *k == Hit::Power));
+        // The console key hints still show all commands at 80 columns.
+        a.command('z');
+        ui::draw(&mut a, 80, 24);
+        for c in ['.', 'z', '[', 'p', '?'] {
+            assert!(a.hits.iter().any(|(_, k)| *k == Hit::Command(c)), "hint {c}");
         }
     }
 

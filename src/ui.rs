@@ -7,7 +7,7 @@
 //!   97 to 119             navigation, main; details on request
 //!   below 97              one pane; navigation opens as an overlay
 
-use crate::app::{App, Hit, Mode, NAV, Pane};
+use crate::app::{App, Hit, Mode, NAV, Pane, Then};
 use crate::canvas::{Canvas, Rect};
 use crate::ipmi::{self, Screen};
 use crate::view::{self, Kind, wrap};
@@ -90,6 +90,8 @@ fn button(app: &mut App, c: &mut Canvas, x: usize, y: usize, label: &str, hit: H
     x + w
 }
 
+const POWER_BUTTON: &str = "[ Power ]";
+
 /// Text of one host tab. Only a visited host has a known state.
 fn host_tab(app: &App, i: usize) -> String {
     let state = match app.states[i].session_ok {
@@ -115,18 +117,22 @@ fn host_bar(app: &mut App, c: &mut Canvas) {
         // Focusing the navigation pane is what opens the overlay.
         x = button(app, c, 0, 0, "[menu]", Hit::Pane(Pane::Nav), Kind::Head) + 1;
     }
+    // The power button keeps the right end. Tabs get what is left of it.
+    let button_x = c.w.saturating_sub(POWER_BUTTON.len());
+    let room = button_x.saturating_sub(1);
+    button(app, c, button_x, 0, POWER_BUTTON, Hit::Power, Kind::Head);
     let tabs: Vec<String> = (0..app.hosts.len()).map(|i| host_tab(app, i)).collect();
     // Width needed to show the tabs from `first` up to the current one.
     let need = |first: usize| tabs[first..=app.current].iter().map(|t| t.len() + 1).sum::<usize>();
     let mut first = 0;
-    while first < app.current && x + need(first) > c.w {
+    while first < app.current && x + need(first) > room {
         first += 1;
     }
     for (i, tab) in tabs.iter().enumerate().skip(first) {
         let kind = if i == app.current { Kind::Head } else { Kind::Dim };
         // The current tab is cut off rather than left out on a tiny screen.
-        let label = if i == app.current { &tab[..tab.len().min(c.w.saturating_sub(x))] } else { tab.as_str() };
-        if label.is_empty() || x + label.len() > c.w {
+        let label = if i == app.current { &tab[..tab.len().min(room.saturating_sub(x))] } else { tab.as_str() };
+        if label.is_empty() || x + label.len() > room {
             break;
         }
         x = button(app, c, x, 0, label, Hit::Host(i), kind) + 1;
@@ -136,7 +142,7 @@ fn host_bar(app: &mut App, c: &mut Canvas) {
         Some(id) => format!("vendor {id}"),
         None => "vendor ?".into(),
     };
-    let right = c.w.saturating_sub(vendor.len() + 1);
+    let right = room.saturating_sub(vendor.len());
     if right > x {
         c.text(right, 0, vendor.len(), &vendor, Kind::Dim);
     }
@@ -259,6 +265,7 @@ fn draw_zoom(app: &mut App, c: &mut Canvas) {
         let y = c.h - 1;
         c.line(0, y, c.w, "", Kind::Head);
         let x = button(app, c, 0, y, "[unzoom]", Hit::Command('z'), Kind::Head) + 1;
+        let x = button(app, c, x, y, POWER_BUTTON, Hit::Power, Kind::Head) + 1;
         let text = format!("{} | {} | {} then ? commands", app.t.label(), console_state(app), app.prefix_name());
         c.text(x, y, c.w.saturating_sub(x), &text, Kind::Head);
     }
@@ -386,7 +393,7 @@ fn key_hints(app: &mut App, c: &mut Canvas, y: usize) {
         c.text(1, y, c.w.saturating_sub(1), &lead, Kind::Dim);
         let mut x = lead.len() + 3;
         if !app.scroll_mode {
-            for (label, cmd) in [(". disconnect", '.'), ("z zoom", 'z'), ("[ scroll", '['), ("Tab pane", '\t'), ("? help", '?')] {
+            for (label, cmd) in [(". disconnect", '.'), ("z zoom", 'z'), ("[ scroll", '['), ("p power", 'p'), ("? help", '?'), ("Tab pane", '\t')] {
                 x = button(app, c, x, y, label, Hit::Command(cmd), Kind::Dim) + 2;
             }
         }
@@ -438,6 +445,7 @@ fn help_text(app: &App) -> Vec<String> {
         "e               export screen to a file",
         "d               show or hide details",
         "r               refresh",
+        "p               power menu",
         "S               full screen console",
         "?               this help",
         "q               quit",
@@ -455,6 +463,7 @@ fn help_text(app: &App) -> Vec<String> {
         "  .      disconnect".into(),
         "  z      zoom".into(),
         "  [      scroll back".into(),
+        "  p      power menu".into(),
         "  Tab    next pane".into(),
         "  u d q ? and 1 to 9 as above".into(),
         format!("  {p} send it to the host"),
@@ -462,6 +471,35 @@ fn help_text(app: &App) -> Vec<String> {
         "Writes are recorded in the audit log.".into(),
     ]);
     v
+}
+
+/// The power menu. The screen behind it stays visible and keeps updating.
+fn draw_power(app: &mut App, c: &mut Canvas) {
+    let items = app.power_actions();
+    let w = 46.min(c.w);
+    // Border, state, blank, entries, blank, button, border.
+    let h = (items.len() + 6).min(c.h);
+    let r = Rect::new((c.w - w) / 2, (c.h - h) / 2, w, h);
+    app.hits.clear();
+    c.clear(r);
+    c.frame(r);
+    // The host is named, so it is clear which machine is acted on.
+    c.text(r.x + 2, r.y, w - 4, &format!(" Power: {} ", app.t.describe()), Kind::Sel);
+    let (state, kind) = app.power_state();
+    c.text(r.x + 2, r.y + 1, w - 4, &state, kind);
+    // On a short terminal the list scrolls with the selection.
+    let rows = h.saturating_sub(6).max(1);
+    let first = (app.power_cursor + 1).saturating_sub(rows);
+    for (row, (i, a)) in items.iter().enumerate().skip(first).take(rows).enumerate() {
+        let mark = if a.risk == ipmi::Risk::High { "!" } else { " " };
+        let kind = if i == app.power_cursor { Kind::Sel } else { Kind::Normal };
+        let y = r.y + 3 + row;
+        c.line(r.x + 2, y, w - 4, &format!(" {mark} {}", a.label), kind);
+        app.hits.push((Rect::new(r.x + 2, y, w - 4, 1), Hit::PowerItem(i)));
+    }
+    let x = button(app, c, r.x + 2, r.y + h - 2, "[ Cancel (Esc) ]", Hit::DialogCancel, Kind::Head);
+    let note = if app.unlocked { "! asks first" } else { "locked" };
+    c.text(x + 2, r.y + h - 2, (r.x + w).saturating_sub(x + 4), note, Kind::Dim);
 }
 
 fn draw_help(app: &mut App, c: &mut Canvas) {
@@ -488,16 +526,18 @@ fn draw_help(app: &mut App, c: &mut Canvas) {
 /// Draw the open dialog on top of everything. It also replaces all clickable
 /// regions, so nothing behind it can be clicked.
 fn dialog(app: &mut App, c: &mut Canvas) {
-    if matches!(app.mode, Mode::Help) {
-        return draw_help(app, c);
+    match app.mode {
+        Mode::Help => return draw_help(app, c),
+        Mode::Power => return draw_power(app, c),
+        _ => {}
     }
     let (title, text, ok, anchor) = match &app.mode {
-        Mode::Normal | Mode::Help => return,
-        Mode::Unlock { anchor, connect } => (
+        Mode::Normal | Mode::Help | Mode::Power => return,
+        Mode::Unlock { anchor, then } => (
             "Unlock",
             vec![
                 format!("Unlock writes on {}?", app.t.describe()),
-                if *connect {
+                if *then == Then::Connect {
                     "The console opens and your keys are typed into the host, until you disconnect.".to_string()
                 } else {
                     "Power, fan, event log and console input become possible.".to_string()
@@ -506,7 +546,7 @@ fn dialog(app: &mut App, c: &mut Canvas) {
             "[ Unlock (y) ]",
             *anchor,
         ),
-        Mode::Confirm { act, anchor } => (
+        Mode::Confirm { act, anchor, .. } => (
             "Confirm",
             vec![format!("Run on {}:", app.t.describe()), act.label.clone(), format!("ipmitool {}", act.args.join(" "))],
             "[ Run (y) ]",

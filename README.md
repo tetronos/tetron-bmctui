@@ -62,6 +62,7 @@ Click screens, rows, buttons and key hints. The wheel scrolls the pane under the
 | arrows, `j`, `k` | move in the focused pane |
 | `Enter` | open a screen or run the selected action |
 | `u` | unlock or lock writes |
+| `p` | power menu |
 | `d` | show or hide details |
 | `/` | filter lines, `Enter` keeps it, `Esc` clears it |
 | `e` | export the screen, as filtered |
@@ -80,6 +81,7 @@ Open the Console screen and press `Enter` or click `[ Connect (Enter) ]`. Connec
 |---|---|
 | `.` | disconnect |
 | `z` | zoom to the whole terminal, or back |
+| `p` | power menu |
 | `[` | scroll back with arrows, `PgUp`, `PgDn`, `Home`; any other key returns |
 | `Tab` | next pane |
 | `u`, `d`, `1` to `9`, `q`, `?` | lock or unlock, details, host, quit, list commands |
@@ -88,6 +90,10 @@ Open the Console screen and press `Enter` or click `[ Connect (Enter) ]`. Connec
 The mouse wheel scrolls back at any time. Mouse events are not sent to the host. The screen is emulated at 100x31, which AMI BIOS setup commonly draws over serial; 80x24 output fits inside it. A smaller pane shows the part around the cursor and is marked as cropped, so make the terminal larger or zoom (a terminal of at least 100x31 shows all of it zoomed). Serial over LAN does not replay earlier output: after connecting, the screen stays blank until the host prints, so press an arrow key in a quiet BIOS menu. `--console-size`, `--scrollback` (default 50000 lines) and `--prefix` change this. `ipmitool` keeps its own escape: `Enter`, `~`, `.` also ends the session.
 
 If another session holds the console, `t` offers to end it, after unlock and confirmation. Not built yet: console log, search, copy, reconnect and an on-screen panel for function keys. On real hardware it has been tried on one Supermicro H12 board.
+
+## Power menu
+
+`[ Power ]` in the top bar, or `p`, opens the power actions on top of the current screen. In a connected console use `Ctrl-]` then `p`. The console stays connected and visible around the menu, and no keys reach the host while it is open. The menu names the host and reads its power state each time it opens. The rules are those of the Power screen. `Esc` or `[ Cancel (Esc) ]` closes the menu, or steps back to it from a confirmation. Clicks outside it do nothing.
 
 ## Events, export and next boot
 

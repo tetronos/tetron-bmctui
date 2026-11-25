@@ -174,6 +174,19 @@ pub fn details(s: Screen, c: &Ctx, width: usize) -> Vec<Line> {
     v.into_iter().flat_map(|(t, k)| wrap(&t, width).into_iter().map(move |l| (l, k))).collect()
 }
 
+/// "Chassis power: on", or why it is not known.
+pub fn power_state(data: Option<&Result<String, String>>, loading: bool) -> Line {
+    match data {
+        None => (if loading { "reading power state..." } else { "power state not read (r reads it)" }.into(), Kind::Dim),
+        Some(Err(_)) => ("power state could not be read".into(), Kind::Bad),
+        Some(Ok(text)) => {
+            let p = ipmi::parse_power(text).unwrap_or_else(|| "unknown".into());
+            let kind = if p == "on" { Kind::Good } else { Kind::Warn };
+            (format!("Chassis power: {p}"), kind)
+        }
+    }
+}
+
 /// Power and Fans: state line, blank line, menu, then notes. The menu is drawn
 /// even when the state could not be read, because actions such as a BMC reset
 /// are most useful exactly then.

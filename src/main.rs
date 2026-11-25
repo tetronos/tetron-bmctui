@@ -53,7 +53,7 @@ The password is never accepted on the command line.
 Mouse: click screens, rows, buttons and key hints. The wheel scrolls the pane
 under the pointer. Hold Shift to select text with the terminal.
 keys: 1-9 host, Tab pane, arrows or j/k move, Enter open or run, u unlock or lock,
-      r refresh, d details, / filter, e export, ? help, S serial console full screen, q quit.
+      r refresh, p power menu, d details, / filter, e export, ? help, S serial console full screen, q quit.
 Console: Enter connects (needs unlock). Then all keys go to the host, except
 Ctrl-] followed by a command; Ctrl-] then ? lists them.
 Harmless actions run at once after unlock. Sensitive ones ask for confirmation.
