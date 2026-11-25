@@ -1,4 +1,4 @@
-//! bmc-tui: proof of concept terminal UI around ipmitool (Supermicro first).
+//! tetron-bmctui: proof of concept terminal UI around ipmitool (Supermicro first).
 
 mod app;
 mod canvas;
@@ -23,10 +23,10 @@ use std::time::{Duration, Instant};
 /// Default idle time before writes lock again, in minutes.
 const RELOCK_MINUTES: u64 = 15;
 
-const USAGE: &str = "bmc-tui: terminal UI around ipmitool (proof of concept, Supermicro first)
+const USAGE: &str = "tetron-bmctui: terminal UI around ipmitool (proof of concept, Supermicro first)
 
-usage: bmc-tui [-H host] [-U user] [-I iface] [--pass-file FILE] [--ipmitool BIN]
-               [--relock MINUTES] [--dump SCREEN]
+usage: tetron-bmctui [-H host] [-U user] [-I iface] [--pass-file FILE]
+               [--ipmitool BIN] [--relock MINUTES] [--dump SCREEN]
 
   -H host           BMC address (env BMC_HOST). Without it ipmitool runs in-band (/dev/ipmi0).
   -U user           BMC user (env BMC_USER)
@@ -42,7 +42,7 @@ under the pointer. Hold Shift to select text with the terminal.
 keys: Tab pane, arrows or j/k move, Enter open or run, u unlock or lock,
       r refresh, d details, S serial console, q quit.
 Harmless actions run at once after unlock. Sensitive ones ask for confirmation.
-Writes are logged in ~/.local/state/bmc-tui/audit.log.";
+Writes are logged in ~/.local/state/tetron-bmctui/audit.log.";
 
 struct Opts {
     t: Target,
@@ -242,7 +242,7 @@ fn main() {
         Ok(Opts { t, dump: Some(s), .. }) => std::process::exit(dump(&t, s)),
         Ok(Opts { t, dump: None, relock }) => {
             if let Err(e) = run(t, relock) {
-                eprintln!("bmc-tui: {e}");
+                eprintln!("tetron-bmctui: {e}");
                 std::process::exit(1);
             }
         }

@@ -1,9 +1,12 @@
 [package]
-name = "bmc-tui"
+name = "tetron-bmctui"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.91"
-description = "Proof of concept terminal UI wrapper around ipmitool, Supermicro first"
+description = "Terminal UI for server BMCs (IPMI now, Redfish planned)"
+license = "MPL-2.0"
+repository = "https://github.com/tetronos/tetron-bmctui"
+keywords = ["bmc", "ipmi", "tui", "server"]
 publish = false
 
 [dependencies]

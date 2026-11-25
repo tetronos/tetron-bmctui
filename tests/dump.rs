@@ -1,7 +1,7 @@
 use std::process::{Command, Output};
 
 fn bin() -> &'static str {
-    env!("CARGO_BIN_EXE_bmc-tui")
+    env!("CARGO_BIN_EXE_tetron-bmctui")
 }
 
 fn fake() -> String {
@@ -72,7 +72,7 @@ fn password_stays_out_of_argv() {
 #[test]
 fn pass_file_must_be_private() {
     use std::os::unix::fs::PermissionsExt;
-    let p = std::env::temp_dir().join(format!("bmc-tui-pw-{}", std::process::id()));
+    let p = std::env::temp_dir().join(format!("tetron-bmctui-pw-{}", std::process::id()));
     std::fs::write(&p, "s3cret\n").unwrap();
     std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap();
     let o = dump("sensors", &["-H", "h", "--pass-file", p.to_str().unwrap()], None);

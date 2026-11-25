@@ -242,7 +242,7 @@ fn audit_path() -> Option<std::path::PathBuf> {
         Some(p) if !p.is_empty() => std::path::PathBuf::from(p),
         _ => std::path::PathBuf::from(std::env::var_os("HOME")?).join(".local/state"),
     };
-    Some(base.join("bmc-tui").join("audit.log"))
+    Some(base.join("tetron-bmctui").join("audit.log"))
 }
 
 /// Append one line to the audit log (mode 0600). Writes are refused by the
