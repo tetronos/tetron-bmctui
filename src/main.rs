@@ -1,4 +1,4 @@
-//! tetron-bmctui: proof of concept terminal UI around ipmitool (Supermicro first).
+//! tetron-bmctui: terminal UI for server BMCs around ipmitool (Supermicro first).
 
 mod app;
 mod canvas;
@@ -28,37 +28,61 @@ use std::time::{Duration, Instant};
 /// Default idle time before writes lock again, in minutes.
 const RELOCK_MINUTES: u64 = 15;
 
-const USAGE: &str = "tetron-bmctui: terminal UI around ipmitool (proof of concept, Supermicro first)
+const USAGE: &str = "tetron-bmctui: terminal UI for server BMCs, using ipmitool (Supermicro first)
 
-usage: tetron-bmctui [-H host] [-U user] [-I iface] [--pass-file FILE]
-               [--hosts FILE] [--select NAME] [--ipmitool BIN] [--relock MINUTES] [--dump SCREEN]
+usage: tetron-bmctui [connection] [options]
+       tetron-bmctui [connection] --dump SCREEN
 
-  -H host           BMC address (env BMC_HOST). Without it ipmitool runs in-band (/dev/ipmi0).
-  -U user           BMC user (env BMC_USER)
-  -I iface          lanplus (default), lan
-  --pass-file FILE  password file, must be mode 0600 (otherwise set IPMI_PASSWORD)
-  --hosts FILE      host list, mode 0600 (default ~/.config/tetron-bmctui/hosts.toml,
-                    used when no -H or BMC_HOST is given)
-  --select NAME     start with this host of the list
-  --ipmitool BIN    ipmitool binary (default: ipmitool)
-  --relock MINUTES  lock writes again after this idle time (default 15, 0 never)
-  --console-size CxR  emulated console size (default 100x31)
-  --console-mono    show the console without colors
-  --scrollback N    console lines kept (default 50000, max 200000)
-  --prefix CHAR     console command key is Ctrl-CHAR (default ])
-  --efi-boot        ask for UEFI with the \"Next boot\" actions
-  --export-dir DIR  where e saves screens (default ~/.local/state/tetron-bmctui/exports)
-  --dump SCREEN     print dash|sensors|sel|fru|control|fan|hosts as text and exit
-
+Connection: one host from the command line, or a host list. With neither,
+ipmitool talks to the local BMC (/dev/ipmi0).
+  -H host             BMC address (env BMC_HOST)
+  -U user             BMC user (env BMC_USER)
+  -I iface            lanplus (default) or lan
+  --pass-file FILE    file holding only the password, mode 0600
+                      (or set IPMI_PASSWORD)
+  --hosts FILE        host list, mode 0600. The default,
+                      ~/.config/tetron-bmctui/hosts.toml, is used when it
+                      exists and no -H or BMC_HOST is given
+  --select NAME       start with this host of the list
 The password is never accepted on the command line.
-Mouse: click screens, rows, buttons and key hints. The wheel scrolls the pane
-under the pointer. Hold Shift to select text with the terminal.
-keys: 1-9 host, Tab pane, arrows or j/k move, Enter open or run, u unlock or lock,
-      r refresh, p power menu, d details, / filter, e export, ? help, S serial console full screen, q quit.
-Console: Enter connects (needs unlock). Then all keys go to the host, except
-Ctrl-] followed by a command; Ctrl-] then ? lists them.
-Harmless actions run at once after unlock. Sensitive ones ask for confirmation.
-Writes are logged in ~/.local/state/tetron-bmctui/audit.log.";
+
+Options:
+  --relock MINUTES    lock writes after this idle time (default 15, 0 never)
+  --console-size CxR  size of the emulated console (default 100x31)
+  --console-mono      show the console without colors
+  --scrollback N      console lines kept (default 50000, max 200000)
+  --prefix CHAR       the console command key is Ctrl-CHAR (default ])
+  --efi-boot          ask for UEFI with the \"Next boot\" actions
+  --export-dir DIR    where e saves screens
+                      (default ~/.local/state/tetron-bmctui/exports)
+  --ipmitool BIN      ipmitool binary (default: ipmitool)
+  --dump SCREEN       print dash, sensors, sel, fru, control, fan or hosts
+                      as text and exit
+  -h, --help          show this help
+
+Keys (? lists them in the program):
+  Tab, Shift-Tab      next or previous pane
+  arrows, j, k        move
+  Enter               open, run or connect
+  u                   unlock or lock writes
+  p                   power menu
+  1 to 9              switch host
+  /  e  r  d          filter, export, refresh, details
+  S                   full screen serial console
+  q                   quit
+
+Serial console: Enter on the Console screen connects, after unlock. Keys then
+go to the host. The command key (Ctrl-]) followed by . disconnects, z zooms,
+[ scrolls back, p opens the power menu, Tab leaves the pane, ? shows help.
+Serial over LAN does not replay output: if the screen is blank, press a key.
+
+Mouse: click screens, hosts, rows, buttons and key hints. The wheel scrolls.
+Hold Shift to select text with the terminal.
+
+Safety: the program starts read-only. After unlock only the identify LED runs
+without confirmation. A connected console stays usable after an idle relock.
+Actions and console sessions are logged in
+~/.local/state/tetron-bmctui/audit.log. Keystrokes are not logged.";
 
 struct Opts {
     /// At least one entry. `current` is the one to start with.
