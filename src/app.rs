@@ -19,16 +19,17 @@ use std::time::{Duration, Instant};
 /// Rows moved by one mouse wheel step.
 const WHEEL_STEP: usize = 3;
 
-/// Entries of the navigation pane, in display order. The console is first.
+/// Entries of the navigation pane, in display order (USER): choose a host,
+/// look at it, then act on it.
 pub const NAV: [Screen; 8] = [
-    Screen::Console,
-    Screen::Dash,
-    Screen::Sensors,
-    Screen::Sel,
-    Screen::Fru,
-    Screen::Control,
-    Screen::Fan,
     Screen::Hosts,
+    Screen::Dash,
+    Screen::Fru,
+    Screen::Sensors,
+    Screen::Fan,
+    Screen::Sel,
+    Screen::Console,
+    Screen::Control,
 ];
 
 /// Seconds between refreshes while Live is on, unless `--refresh` says else.
@@ -201,6 +202,13 @@ pub struct App {
     pub data: HashMap<Screen, Result<String, String>>,
     pub loading: HashSet<Screen>,
     last: HashMap<Screen, Instant>,
+    /// First visible entry of the navigation pane, which scrolls when the
+    /// terminal is too short for all of them.
+    pub nav_scroll: usize,
+    /// Highlighted entry and pane height at the latest draw. The list follows
+    /// the highlight only when one of them changes, so the wheel can scroll.
+    pub nav_seen: Option<(usize, usize)>,
+    pub nav_rows: usize,
     /// First visible line of the main pane and of the details pane.
     pub scroll: usize,
     pub detail_scroll: usize,
@@ -292,6 +300,9 @@ impl App {
             detail_scroll: 0,
             cursor: 0,
             nav_cursor: 1,
+            nav_scroll: 0,
+            nav_seen: None,
+            nav_rows: NAV.len(),
             focus: Pane::Main,
             details: None,
             unlocked: false,
@@ -1534,8 +1545,11 @@ impl App {
             Some(Pane::Main) if self.screen == Screen::Console => self.scroll_console(-delta),
             Some(Pane::Main) => self.scroll = self.scroll.saturating_add_signed(delta).min(self.max_scroll()),
             Some(Pane::Details) => self.scroll_details(delta),
-            // The navigation list is short and does not scroll.
-            Some(Pane::Nav) | None => {}
+            Some(Pane::Nav) => {
+                let max = NAV.len().saturating_sub(self.nav_rows);
+                self.nav_scroll = self.nav_scroll.saturating_add_signed(delta.signum()).min(max);
+            }
+            None => {}
         }
     }
 }
@@ -1579,9 +1593,13 @@ mod tests {
         assert!(a.unlocked);
     }
 
+    /// The clickable navigation entry of a screen.
+    fn nav(s: Screen) -> Hit {
+        Hit::Nav(NAV.iter().position(|n| *n == s).unwrap())
+    }
+
     fn open_power(a: &mut App) {
-        let i = NAV.iter().position(|n| *n == Screen::Control).unwrap();
-        click(a, Hit::Nav(i));
+        click(a, nav(Screen::Control));
         assert_eq!(a.screen, Screen::Control);
     }
 
@@ -1695,12 +1713,12 @@ mod tests {
         press(&mut a, KeyCode::Down);
         assert_eq!(a.screen, Screen::Dash, "moving does not fetch");
         press(&mut a, KeyCode::Enter);
-        assert_eq!((a.screen, a.focus), (Screen::Sensors, Pane::Main));
+        assert_eq!((a.screen, a.focus), (Screen::Fru, Pane::Main));
     }
 
     /// Open the Console screen with a fake session that has printed `output`.
     fn with_console(a: &mut App, output: &[u8]) -> std::sync::mpsc::Receiver<Vec<u8>> {
-        click(a, Hit::Nav(0));
+        click(a, nav(Screen::Console));
         let (c, rx) = Console::fake(&a.t, output);
         a.connected(Ok(c));
         ui::draw(a, 120, 28);
@@ -1719,7 +1737,7 @@ mod tests {
     #[test]
     fn connecting_needs_unlock_once() {
         let mut a = app(120, 28);
-        click(&mut a, Hit::Nav(0));
+        click(&mut a, nav(Screen::Console));
         press(&mut a, KeyCode::Enter);
         assert!(matches!(a.mode, Mode::Unlock { then: Then::Connect, .. }) && !a.want_connect);
         press(&mut a, KeyCode::Enter);
@@ -1735,7 +1753,10 @@ mod tests {
     fn connect_by_keyboard_only() {
         let mut a = app(120, 28);
         press(&mut a, KeyCode::BackTab);
-        press(&mut a, KeyCode::Up);
+        // From Overview down to Console.
+        for _ in 0..5 {
+            press(&mut a, KeyCode::Down);
+        }
         press(&mut a, KeyCode::Enter); // open the Console screen
         assert_eq!((a.screen, a.focus), (Screen::Console, Pane::Main));
         press(&mut a, KeyCode::Enter);
@@ -2199,6 +2220,64 @@ mod tests {
         assert_eq!(highlighted_rows(&mut a), [2]);
         click(&mut a, Hit::Row(1));
         assert_eq!(highlighted_rows(&mut a), [1]);
+    }
+
+    #[test]
+    fn screens_are_in_the_users_order() {
+        let titles: Vec<&str> = NAV.iter().map(|s| s.title()).collect();
+        assert_eq!(titles, ["Hosts", "Overview", "Inventory", "Sensors", "Fans", "Events", "Console", "Power"]);
+    }
+
+    /// Screens whose navigation entry is on screen and clickable.
+    fn nav_shown(a: &App) -> Vec<Screen> {
+        a.hits.iter().filter_map(|(_, h)| if let Hit::Nav(i) = h { Some(NAV[*i]) } else { None }).collect()
+    }
+
+    #[test]
+    fn every_screen_is_reachable_on_the_smallest_terminal() {
+        // Narrow: the list is an overlay. Short and wide: it is a pane.
+        for w in [40, 80, 120] {
+            let mut a = app(w, 12);
+            a.focus_pane(Pane::Nav);
+            ui::draw(&mut a, w, 12);
+            assert!(nav_shown(&a).len() < NAV.len(), "the list does not fit at 12 rows");
+            // The keyboard walks to the last entry and back to the first.
+            for (key, want) in [(KeyCode::Down, Screen::Control), (KeyCode::Up, Screen::Hosts)] {
+                for _ in 0..NAV.len() {
+                    a.key(key, KeyModifiers::NONE);
+                    let c = ui::draw(&mut a, w, 12);
+                    assert!(nav_shown(&a).contains(&NAV[a.nav_cursor]), "highlight visible at width {w}");
+                    drop(c);
+                }
+                assert_eq!(NAV[a.nav_cursor], want);
+            }
+            // The wheel scrolls without moving the highlight, and a click on
+            // the entry that came into view opens it.
+            let r = a.hits.iter().find(|(_, h)| matches!(h, Hit::Nav(_))).unwrap().0;
+            for _ in 0..NAV.len() {
+                a.mouse(MouseEvent { kind: MouseEventKind::ScrollDown, column: r.x as u16, row: r.y as u16, modifiers: KeyModifiers::NONE });
+                ui::draw(&mut a, w, 12);
+            }
+            assert!(nav_shown(&a).contains(&Screen::Control), "wheel at width {w}");
+            assert_eq!(NAV[a.nav_cursor], Screen::Hosts);
+            let i = NAV.len() - 1;
+            let r = a.hits.iter().find(|(_, h)| *h == Hit::Nav(i)).unwrap().0;
+            a.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: r.x as u16, row: r.y as u16, modifiers: KeyModifiers::NONE });
+            assert_eq!(a.screen, Screen::Control);
+        }
+    }
+
+    #[test]
+    fn the_open_screen_stays_visible_in_a_short_list() {
+        let mut a = app(120, 12);
+        for s in NAV {
+            a.switch(s);
+            ui::draw(&mut a, 120, 12);
+            assert!(nav_shown(&a).contains(&s), "{s:?}");
+        }
+        // With room for everything the list does not stay scrolled.
+        ui::draw(&mut a, 120, 28);
+        assert_eq!((nav_shown(&a).len(), a.nav_scroll), (NAV.len(), 0));
     }
 
     #[test]

@@ -158,15 +158,35 @@ fn host_bar(app: &mut App, c: &mut Canvas) {
 fn draw_nav(app: &mut App, c: &mut Canvas, r: Rect) {
     pane(app, c, r, Pane::Nav, "Screens");
     let a = inner(r);
-    for (i, item) in NAV.iter().enumerate().take(a.h) {
+    // The highlight follows the keyboard while the pane has the focus, and
+    // otherwise marks the screen that is open.
+    let open = NAV.iter().position(|n| *n == app.screen).unwrap_or(0);
+    let marked = if app.focus == Pane::Nav { app.nav_cursor } else { open };
+    app.nav_rows = a.h.max(1);
+    if app.nav_seen != Some((marked, a.h)) {
+        app.nav_seen = Some((marked, a.h));
+        if marked < app.nav_scroll {
+            app.nav_scroll = marked;
+        } else if marked >= app.nav_scroll + app.nav_rows {
+            app.nav_scroll = marked + 1 - app.nav_rows;
+        }
+    }
+    let max = NAV.len().saturating_sub(app.nav_rows);
+    app.nav_scroll = app.nav_scroll.min(max);
+    for (row, (i, item)) in NAV.iter().enumerate().skip(app.nav_scroll).take(a.h).enumerate() {
         let current = *item == app.screen;
         let text = format!("{} {}", if current { ">" } else { " " }, item.title());
-        // The highlight follows the keyboard while the pane has the focus, and
-        // otherwise marks the screen that is open.
-        let selected = if app.focus == Pane::Nav { app.nav_cursor == i } else { current };
-        let kind = if selected { Kind::Sel } else { Kind::Normal };
-        c.line(a.x, a.y + i, a.w, &text, kind);
-        app.hits.push((Rect::new(a.x, a.y + i, a.w, 1), Hit::Nav(i)));
+        let kind = if marked == i { Kind::Sel } else { Kind::Normal };
+        c.line(a.x, a.y + row, a.w, &text, kind);
+        app.hits.push((Rect::new(a.x, a.y + row, a.w, 1), Hit::Nav(i)));
+    }
+    // Show that there is more above or below. The pane is too narrow for the
+    // word the other panes use: it would cover the title.
+    if app.nav_scroll > 0 {
+        c.text(r.x + r.w.saturating_sub(4), r.y, 3, " ^ ", Kind::Head);
+    }
+    if app.nav_scroll < max {
+        c.text(r.x + r.w.saturating_sub(4), r.y + r.h - 1, 3, " v ", Kind::Head);
     }
 }
 
