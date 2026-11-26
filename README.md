@@ -120,7 +120,7 @@ When you change **your own login**:
 - If the change is not confirmed or the login fails, nothing is retried, because repeated wrong passwords can lock a BMC account. The result window shows where the new password is saved. Check which password works before you try again.
 - Other saved servers that hold a copy of the old password are not changed.
 
-While a change runs, the program does nothing else with the BMC. If you quit, it waits for the change to finish. This feature is tested with a simulated BMC. On real hardware only the password prompt has been checked, not a change.
+While a change runs, the program does nothing else with the BMC. If you quit, it waits for the change to finish. On real hardware (one Supermicro H12 board) the password of a second, temporary user was changed to 20 characters with symbols and a login with it worked. Changing the password of your own login has been tested only with a simulated BMC.
 
 ## Keys and mouse
 
