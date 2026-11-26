@@ -42,7 +42,8 @@ ipmitool talks to the local BMC (/dev/ipmi0).
                       (or set IPMI_PASSWORD)
   --hosts FILE        host list, mode 0600. The default,
                       ~/.config/tetron-bmctui/hosts.toml, is used when it
-                      exists and no -H or BMC_HOST is given
+                      exists. With -H or BMC_HOST that host comes first and
+                      the saved ones can be picked too
   --select NAME       start with this host of the list
 The password is never accepted on the command line.
 
@@ -73,7 +74,7 @@ Keys (? lists them in the program):
   /  e  r  d          filter, export, refresh, details
   l                   Live: refresh Overview or Sensors repeatedly
   S                   full screen serial console
-  a                   add a host (on the Hosts screen)
+  a, w                add a host, change its saved password (Hosts screen)
   q                   quit
 
 Serial console: Enter on the Console screen connects, after unlock. Keys then
@@ -100,6 +101,8 @@ struct Opts {
     efi_boot: bool,
     /// Seconds between Live refreshes when asked for at startup. 0 is off.
     refresh: u64,
+    /// A problem to show once the program runs.
+    warning: Option<String>,
     /// Where added hosts are saved: the list in use, or the default one.
     list_path: Option<PathBuf>,
     console_mono: bool,
@@ -196,10 +199,12 @@ fn parse_args() -> Result<Opts, String> {
     if list.is_some() && flag_h {
         return Err("use either --hosts or -H".into());
     }
-    // The default list applies only when no host was named in another way.
+    // The default list applies when no host was named in another way. With a
+    // host from the command line its hosts are added after that one.
     if list.is_none() && t.host.is_none() {
         list = hosts::default_path().filter(|p| p.exists());
     }
+    let mut warning = None;
     let list_path = list.clone().or_else(hosts::default_path);
     let (hosts, current) = match list {
         Some(path) => {
@@ -214,19 +219,30 @@ fn parse_args() -> Result<Opts, String> {
             (all, current)
         }
         None => {
-            if select.is_some() {
-                return Err("--select needs a host list".into());
-            }
             if let Some(f) = &t.pass_file {
                 hosts::check_private(f)?;
             }
             if t.host.is_some() && t.pass_file.is_none() && std::env::var_os("IPMI_PASSWORD").is_none() {
                 return Err("set IPMI_PASSWORD or pass --pass-file for LAN access".into());
             }
-            (vec![t], 0)
+            let mut all = vec![t];
+            if all[0].host.is_some()
+                && let Some(path) = hosts::default_path().filter(|p| p.exists())
+            {
+                // The named host must work also when the list is broken.
+                match hosts::load(&path, &all[0].bin) {
+                    Ok(saved) => all.extend(saved),
+                    Err(e) => warning = Some(format!("saved hosts not loaded: {e}")),
+                }
+            }
+            let current = match &select {
+                Some(n) => all.iter().position(|h| h.name.as_ref() == Some(n)).ok_or(format!("--select: no saved host named {n}"))?,
+                None => 0,
+            };
+            (all, current)
         }
     };
-    Ok(Opts { hosts, current, dump, relock, console, prefix, efi_boot, console_mono, export_dir, list_path, refresh })
+    Ok(Opts { hosts, current, dump, relock, console, prefix, efi_boot, console_mono, export_dir, list_path, refresh, warning })
 }
 
 /// Raw mode, alternate screen and mouse capture. Dropping the guard restores
@@ -290,6 +306,15 @@ fn add_host(app: &mut App, form: app::HostForm, list: Option<&Path>) {
         app.host_added(form, Err("no HOME for the host list".into()));
         return;
     };
+    if form.change.is_some() {
+        let r = hosts::set_password(list, &pass_dir, &form.host, &app.t.bin);
+        let changed = r.as_ref().ok().map(|c| c.target.describe());
+        app.password_changed(form, r);
+        if let Some(who) = changed {
+            let _ = ipmi::audit(&who, "saved password changed in the host list");
+        }
+        return;
+    }
     let r = hosts::add(list, &pass_dir, &form.host, &app.t.bin);
     let added = r.as_ref().ok().map(|t| t.describe());
     app.host_added(form, r);
@@ -348,13 +373,16 @@ fn redraw(app: &mut App, out: &mut impl Write) -> io::Result<()> {
 }
 
 fn run(opts: Opts) -> io::Result<()> {
-    let Opts { hosts, current, relock, console, prefix, efi_boot, console_mono, export_dir, list_path, refresh, .. } = opts;
+    let Opts { hosts, current, relock, console, prefix, efi_boot, console_mono, export_dir, list_path, refresh, warning, .. } = opts;
     let export_dir = export_dir.or_else(|| ipmi::state_dir().map(|d| d.join("exports")));
     let (tx, rx): (Sender<Msg>, Receiver<Msg>) = mpsc::channel();
     let mut app = App::new(hosts, current, relock, tx.clone());
     app.console_settings = console;
     app.prefix = prefix;
     app.efi_boot = efi_boot;
+    if let Some(w) = warning {
+        app.status = w;
+    }
     if refresh > 0 {
         app.live_every = Duration::from_secs(refresh);
         app.live = true;

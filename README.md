@@ -64,9 +64,13 @@ Run `tetron-bmctui --help` for all options.
 
 ## Several servers
 
-To add a server in the program, open the **Hosts** screen and press `a` or click `[ Add host ]`. Move between fields with `Tab` or by clicking. `Enter` goes to the next field and saves from the last one. Give either the path of a password file or the password itself.
+**Picking a server:** click its tab in the top bar or press its number. On the **Hosts** screen, click or move to a server to select it, then press `Enter` or click `[ Use ]`. Selecting alone does not contact it.
 
-A password file that you manage is advised. If you type the password, the program warns you and asks for confirmation, then saves it in a new file in `~/.config/tetron-bmctui/pass/`. That file is **not encrypted**: it has mode 0600, but your account, an administrator or anyone with access to an unencrypted disk or backup can read it. The new entry is added to the end of your host list, and your comments are kept. If you started with `-H`, the entry is saved to the default list, which is used the next time you start without `-H`.
+**Changing a saved password:** select the server on the Hosts screen and press `w` or click `[ Password ]`. Give another password file or type the new password. This changes only what is saved on your computer. **It does not change the password on the BMC.** If the old password was in a file that this program wrote and no other server uses it, that file is deleted. Your own files are never deleted. Nothing logs in with the new password until you ask, for example with `r`.
+
+**Adding a server:** on the Hosts screen, press `a` or click `[ Add host ]`. Move between fields with `Tab` or by clicking. `Enter` goes to the next field and saves from the last one. Give either the path of a password file or the password itself.
+
+A password file that you manage is advised. If you type the password, the program warns you and asks for confirmation, then saves it in a new file in `~/.config/tetron-bmctui/pass/`. That file is **not encrypted**: it has mode 0600, but your account, an administrator or anyone with access to an unencrypted disk or backup can read it. The new entry is added to the end of your host list, and your comments are kept. If you started with `-H`, that server comes first and your saved servers can be picked too. To keep the server given with `-H`, select it and click `[ Save host ]`.
 
 You can also edit the list yourself. List your servers in `~/.config/tetron-bmctui/hosts.toml`:
 
@@ -87,7 +91,7 @@ pass_file = "~/.bmc-pass-db01"
 
 The list and every password file must have mode 0600 (`chmod 600`). The list itself holds no passwords, only the path of each password file.
 
-The list is used when neither `-H` nor `BMC_HOST` is given. `--hosts FILE` names another list and `--select NAME` chooses the first server. The top bar shows the IP and MAC address of the selected server's BMC when the terminal is wide enough; the Hosts screen shows them in its details too. Only the selected server is contacted, and each tab shows when its state was last checked.
+The default list is loaded at start. With `-H` or `BMC_HOST`, that host comes first and is the one in use. `--hosts FILE` names another list and `--select NAME` chooses the first server. The top bar shows the IP and MAC address of the selected server's BMC when the terminal is wide enough; the Hosts screen shows them in its details too. Only the selected server is contacted, and each tab shows when its state was last checked.
 
 ## Keys and mouse
 
@@ -104,6 +108,7 @@ You can click screens, host tabs, rows, buttons and key hints. The mouse wheel s
 | `/` | filter sensors, events or inventory; `Esc` clears it |
 | `e` | export the screen |
 | `a` | add a server (Hosts screen) |
+| `w` | change a saved password, or save a `-H` server (Hosts screen) |
 | `d` | show or hide details |
 | `r` | refresh |
 | `l` | Live on or off (Overview and Sensors) |

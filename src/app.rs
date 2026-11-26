@@ -66,8 +66,11 @@ pub enum Hit {
     /// The power button in the top bar, and an entry of the power menu.
     /// The Live button of the open screen.
     Live,
-    /// The "add host" button, and a field of its form.
+    /// The buttons below the host list, and a field of their forms.
     AddHost,
+    HostPassword,
+    SaveToList,
+    UseHost,
     Field(usize),
     Power,
     PowerItem(usize),
@@ -115,6 +118,9 @@ const FIELD_MAX: usize = 128;
 
 #[derive(Clone, Debug, Default)]
 pub struct HostForm {
+    /// With the index of a host the form changes its saved password, and only
+    /// the last two fields are shown. Otherwise it adds a host.
+    pub change: Option<usize>,
     /// Its `Debug` output hides the password.
     pub host: NewHost,
     /// Index into `FORM_FIELDS`.
@@ -123,6 +129,11 @@ pub struct HostForm {
 }
 
 impl HostForm {
+    /// Indexes into `FORM_FIELDS` that this form shows.
+    pub fn fields(&self) -> std::ops::Range<usize> {
+        if self.change.is_some() { FORM_PASSWORD - 1..FORM_FIELDS.len() } else { 0..FORM_FIELDS.len() }
+    }
+
     pub fn value(&self, i: usize) -> &str {
         [&self.host.name, &self.host.address, &self.host.user, &self.host.pass_file, &self.host.password][i]
     }
@@ -523,12 +534,49 @@ impl App {
         self.mode = Mode::AddHost(HostForm::default());
     }
 
+    /// The host selected on the Hosts screen.
+    pub fn selected_host(&self) -> Option<usize> {
+        if self.screen != Screen::Hosts {
+            return None;
+        }
+        self.cursor.checked_sub(1).filter(|i| *i < self.hosts.len())
+    }
+
+    /// Open the right form for the selected host. A host of the list gets its
+    /// saved password changed. A host from the command line has no entry yet,
+    /// so it is offered to be saved. Nothing here contacts or changes a BMC.
+    pub fn open_host_password(&mut self) {
+        let Some(i) = self.selected_host() else { return };
+        let h = &self.hosts[i];
+        if h.name.is_some() {
+            self.mode = Mode::AddHost(HostForm { change: Some(i), field: FORM_PASSWORD - 1, ..Default::default() });
+        } else if let Some(address) = &h.host {
+            let host = NewHost {
+                address: address.clone(),
+                user: h.user.clone().unwrap_or_default(),
+                pass_file: h.pass_file.clone().unwrap_or_default(),
+                ..Default::default()
+            };
+            self.mode = Mode::AddHost(HostForm { host, ..Default::default() });
+        } else {
+            self.status = "the local BMC needs no password".into();
+        }
+    }
+
     /// Save was chosen. A typed password is written to disk only after a
     /// warning and a confirmation.
     fn submit_host(&mut self) {
         let Mode::AddHost(mut form) = std::mem::replace(&mut self.mode, Mode::Normal) else { return };
-        let taken = self.hosts.iter().any(|h| h.name.as_ref() == Some(&form.host.name));
-        let checked = hosts::validate(&form.host).and_then(|()| if taken { Err("that name is already in use".into()) } else { Ok(()) });
+        let checked = match form.change {
+            Some(i) => {
+                form.host.name = self.hosts.get(i).and_then(|h| h.name.clone()).unwrap_or_default();
+                hosts::validate_password(&form.host)
+            }
+            None => {
+                let taken = self.hosts.iter().any(|h| h.name.as_ref() == Some(&form.host.name));
+                hosts::validate(&form.host).and_then(|()| if taken { Err("that name is already in use".into()) } else { Ok(()) })
+            }
+        };
         match checked {
             Err(e) => {
                 form.error = e;
@@ -559,13 +607,41 @@ impl App {
         }
     }
 
+    /// The main loop reports the result of changing a saved password.
+    pub fn password_changed(&mut self, mut form: HostForm, r: Result<hosts::Changed, String>) {
+        let Some(i) = form.change.filter(|i| *i < self.hosts.len()) else { return };
+        match r {
+            Ok(c) => {
+                self.hosts[i] = c.target.clone();
+                // What was known came from the old password, also a stop after
+                // a failed login. Nothing logs in until the user asks.
+                self.states[i] = HostState { lan: self.states[i].lan.take(), ..HostState::default() };
+                if i == self.current {
+                    self.t = c.target;
+                    // Late replies to requests with the old password are dropped.
+                    self.epoch += 1;
+                    self.loading.clear();
+                    self.vendor_pending = false;
+                }
+                // No path here: the status line would cut it off.
+                let gone = if c.removed.is_some() { " Old password file deleted." } else { "" };
+                let next = if i == self.current { " Open a screen and press r to try it." } else { "" };
+                self.status = format!("saved password changed for {}.{next}{gone}", self.hosts[i].label());
+            }
+            Err(e) => {
+                form.error = e;
+                self.mode = Mode::AddHost(form);
+            }
+        }
+    }
+
     fn form_key(&mut self, code: KeyCode, mods: KeyModifiers) {
         let Mode::AddHost(form) = &mut self.mode else { return };
-        let last = FORM_FIELDS.len() - 1;
+        let (first, last) = (form.fields().start, form.fields().end - 1);
         match code {
             KeyCode::Esc => self.dialog_cancel(),
-            KeyCode::Tab | KeyCode::Down => form.field = (form.field + 1) % FORM_FIELDS.len(),
-            KeyCode::BackTab | KeyCode::Up => form.field = (form.field + last) % FORM_FIELDS.len(),
+            KeyCode::Tab | KeyCode::Down => form.field = if form.field >= last { first } else { form.field + 1 },
+            KeyCode::BackTab | KeyCode::Up => form.field = if form.field <= first { last } else { form.field - 1 },
             // Enter walks through the fields and saves from the last one.
             KeyCode::Enter if form.field < last => form.field += 1,
             KeyCode::Enter => self.submit_host(),
@@ -1237,6 +1313,7 @@ impl App {
             KeyCode::Char('l') => self.toggle_live(),
             KeyCode::Char('p') => self.open_power_menu(),
             KeyCode::Char('a') if self.screen == Screen::Hosts => self.open_add_host(),
+            KeyCode::Char('w') if self.screen == Screen::Hosts => self.open_host_password(),
             // Esc first removes a filter that is in effect.
             KeyCode::Esc if !self.filter.is_empty() => self.clear_filter(),
             KeyCode::Char('q') => self.quit = true,
@@ -1345,9 +1422,10 @@ impl App {
                 self.focus = Pane::Main;
                 self.detail_scroll = 0;
                 if self.screen == Screen::Hosts {
+                    // A click only selects, so that a host's password can
+                    // be fixed without first logging in with it.
                     if (1..=self.hosts.len()).contains(&line) {
                         self.cursor = line;
-                        self.pick();
                     }
                 } else if self.menu().is_empty() {
                     if line >= self.first_row() {
@@ -1366,6 +1444,8 @@ impl App {
             Hit::Power => self.open_power_menu(),
             Hit::Live => self.toggle_live(),
             Hit::AddHost => self.open_add_host(),
+            Hit::HostPassword | Hit::SaveToList => self.open_host_password(),
+            Hit::UseHost => self.pick(),
             Hit::Field(_) => {}
             // Only drawn while the menu is open, which is handled above.
             Hit::PowerItem(_) => {}
@@ -1813,6 +1893,8 @@ mod tests {
         press(&mut a, KeyCode::Enter);
         assert_eq!((a.current, a.screen), (1, Screen::Hosts));
         click(&mut a, Hit::Row(1));
+        assert_eq!((a.current, a.cursor), (1, 1), "a click only selects");
+        click(&mut a, Hit::UseHost);
         assert_eq!(a.current, 0);
     }
 
@@ -1924,6 +2006,96 @@ mod tests {
         assert!(matches!(&a.mode, Mode::AddHost(f) if f.error.contains("already in use")));
         click(&mut a, Hit::DialogCancel);
         assert!(matches!(a.mode, Mode::Normal) && a.want_add.is_none());
+    }
+
+    #[test]
+    fn change_the_saved_password_of_a_host_not_in_use() {
+        let mut a = two_hosts();
+        a.switch(Screen::Hosts);
+        a.states[1].halt_auto = true;
+        ui::draw(&mut a, 120, 28);
+        let before = a.epoch;
+        click(&mut a, Hit::Row(2));
+        click(&mut a, Hit::HostPassword);
+        assert!(matches!(&a.mode, Mode::AddHost(f) if f.change == Some(1)));
+        assert_eq!((a.current, a.epoch), (0, before), "nothing was switched or contacted");
+        let c = ui::draw(&mut a, 120, 28);
+        let screen: String = (0..28).map(|y| c.row(y)).collect();
+        assert!(screen.contains("Saved password: two") && screen.contains("not change the BMC") && !screen.contains("Address "));
+        // Tab stays within the two fields. Letters are text.
+        press(&mut a, KeyCode::Tab);
+        type_text(&mut a, "q-secret");
+        press(&mut a, KeyCode::Tab);
+        press(&mut a, KeyCode::Tab);
+        press(&mut a, KeyCode::Enter);
+        assert!(matches!(a.mode, Mode::SavePassword { .. }) && a.want_add.is_none());
+        press(&mut a, KeyCode::Enter);
+        assert!(a.want_add.is_none(), "Enter alone must not save");
+        press(&mut a, KeyCode::Char('y'));
+        let form = a.want_add.take().unwrap();
+        assert_eq!((form.change, form.host.name.as_str(), form.host.password.as_str()), (Some(1), "two", "q-secret"));
+        let t = Target { pass_file: Some("/new".into()), ..a.hosts[1].clone() };
+        a.password_changed(form, Ok(hosts::Changed { target: t, removed: None }));
+        assert_eq!(a.hosts[1].pass_file.as_deref(), Some("/new"));
+        assert!(!a.states[1].halt_auto && a.current == 0 && a.epoch == before && a.loading.is_empty());
+        assert!(!a.status.contains("q-secret"));
+    }
+
+    #[test]
+    fn new_password_for_the_host_in_use_waits_for_the_user() {
+        let mut a = two_hosts();
+        a.switch(Screen::Hosts);
+        a.states[0].halt_auto = true;
+        let old = a.epoch;
+        press(&mut a, KeyCode::Char('w'));
+        let Mode::AddHost(mut form) = std::mem::replace(&mut a.mode, Mode::Normal) else { panic!("no form") };
+        form.host.pass_file = "/new".into();
+        let t = Target { pass_file: Some("/new".into()), ..a.hosts[0].clone() };
+        a.password_changed(form, Ok(hosts::Changed { target: t, removed: None }));
+        assert_eq!(a.t.pass_file.as_deref(), Some("/new"));
+        assert!(a.epoch > old && !a.states[0].halt_auto && a.loading.is_empty(), "no login by itself");
+    }
+
+    #[test]
+    fn command_line_host_can_be_saved() {
+        let mut a = app(120, 28);
+        a.t.user = Some("ADMIN".into());
+        a.t.pass_file = Some("/home/x/pw".into());
+        a.hosts[0] = a.t.clone();
+        a.switch(Screen::Hosts);
+        ui::draw(&mut a, 120, 28);
+        click(&mut a, Hit::SaveToList);
+        assert!(matches!(&a.mode, Mode::AddHost(f) if f.change.is_none() && f.host.address == "testbox" && f.host.user == "ADMIN" && f.host.pass_file == "/home/x/pw"));
+    }
+
+    /// The buttons belong to the list, not to the details of one host.
+    #[test]
+    fn host_buttons_are_in_the_list_pane_at_every_size() {
+        let mut a = two_hosts();
+        a.switch(Screen::Hosts);
+        for (w, h) in [(40, 12), (80, 24), (97, 24), (120, 28), (160, 40)] {
+            ui::draw(&mut a, w, h);
+            let main = ui::layout(w, h, a.details_visible(), false).main;
+            for k in [Hit::AddHost, Hit::HostPassword, Hit::UseHost] {
+                let r = a.hits.iter().find(|(_, x)| *x == k).unwrap_or_else(|| panic!("{k:?} at {w}x{h}")).0;
+                if let Some(m) = main {
+                    assert!(r.x > m.x && r.x + r.w < m.x + m.w, "{k:?} outside the list at {w}x{h}");
+                }
+            }
+        }
+        // With more hosts than rows the buttons stay on screen.
+        let base = a.hosts[0].clone();
+        a.hosts = (0..40).map(|i| Target { name: Some(format!("h{i}")), ..base.clone() }).collect();
+        a.states = vec![HostState::default(); 40];
+        a.switch(Screen::Hosts);
+        for _ in 0..39 {
+            press(&mut a, KeyCode::Down);
+        }
+        ui::draw(&mut a, 80, 14);
+        a.key(KeyCode::Up, KeyModifiers::NONE);
+        a.key(KeyCode::Down, KeyModifiers::NONE);
+        ui::draw(&mut a, 80, 14);
+        assert!(a.hits.iter().any(|(_, k)| *k == Hit::Row(40)) && a.hits.iter().any(|(_, k)| *k == Hit::AddHost));
     }
 
     #[test]

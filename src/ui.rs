@@ -169,6 +169,22 @@ fn draw_nav(app: &mut App, c: &mut Canvas, r: Rect) {
     }
 }
 
+/// The actions of the host list. The middle one depends on the selected host.
+fn host_buttons(app: &mut App, c: &mut Canvas, x: usize, y: usize) {
+    let mut x = button(app, c, x, y, "[ Add host ]", Hit::AddHost, Kind::Head) + 1;
+    if let Some(i) = app.selected_host() {
+        let listed = app.hosts[i].name.is_some();
+        let (label, hit) = if listed { ("[ Password ]", Hit::HostPassword) } else { ("[ Save host ]", Hit::SaveToList) };
+        // The local BMC has neither a password nor anything to save.
+        if listed || app.hosts[i].host.is_some() {
+            x = button(app, c, x, y, label, hit, Kind::Head) + 1;
+        }
+        let kind = if i == app.current { Kind::Dim } else { Kind::Head };
+        // A narrower label keeps all three on a 40 column terminal.
+        button(app, c, x, y, "[ Use ]", Hit::UseHost, kind);
+    }
+}
+
 /// Draw the emulator cells into `a`. When the area is smaller than the
 /// emulated screen, the part around the cursor is shown.
 fn draw_console_cells(app: &mut App, c: &mut Canvas, a: Rect) {
@@ -336,7 +352,12 @@ fn draw_main(app: &mut App, c: &mut Canvas, r: Rect) {
         corner = corner.saturating_sub(label.len() + 1);
         button(app, c, corner, r.y, label, Hit::Live, if app.live { Kind::Sel } else { Kind::Head });
     }
-    let a = inner(r);
+    let mut a = inner(r);
+    // The host list keeps its last row for its buttons.
+    let buttons_row = (app.screen == Screen::Hosts && a.h > 1).then(|| {
+        a.h -= 1;
+        a.y + a.h
+    });
     app.view_rows = a.h.max(1);
     app.scroll = app.scroll.min(app.max_scroll());
     let lines = app.lines();
@@ -349,6 +370,11 @@ fn draw_main(app: &mut App, c: &mut Canvas, r: Rect) {
         // One column of padding on each side of the text.
         c.line(a.x, a.y + row, a.w, &format!(" {text}"), kind);
         app.hits.push((Rect::new(a.x, a.y + row, a.w, 1), Hit::Row(i)));
+    }
+    if let Some(last) = buttons_row {
+        // Right below the list when it is short, else in the last row.
+        let y = last.min(a.y + lines.len().saturating_sub(app.scroll) + 1);
+        host_buttons(app, c, a.x + 1, y);
     }
     // Show that there is more above or below.
     if app.scroll > 0 {
@@ -374,9 +400,6 @@ fn draw_details(app: &mut App, c: &mut Canvas, r: Rect) {
     app.detail_scroll = app.detail_scroll.min(lines.len().saturating_sub(app.detail_rows));
     for (row, (text, kind)) in lines.iter().skip(app.detail_scroll).take(app.detail_rows).enumerate() {
         c.text(a.x + 1, a.y + row, width, text, *kind);
-    }
-    if app.screen == Screen::Hosts && a.h > 2 {
-        button(app, c, a.x + 1, a.y + a.h - 1, "[ Add host ]", Hit::AddHost, Kind::Head);
     }
     if has_run {
         // The button is greyed while locked. It still reacts, with the reason.
@@ -428,7 +451,8 @@ fn key_hints(app: &mut App, c: &mut Canvas, y: usize) {
         hints.push(("? help", KeyCode::Char('?')));
         hints.push(("q quit", KeyCode::Char('q')));
         if app.screen == Screen::Hosts {
-            hints.push(("a add host", KeyCode::Char('a')));
+            hints.push(("a add", KeyCode::Char('a')));
+            hints.push(("w password", KeyCode::Char('w')));
         }
         if app.screen == Screen::Console && !app.console_live() {
             hints.push(("Enter connect", KeyCode::Enter));
@@ -472,7 +496,7 @@ fn help_text(app: &App) -> Vec<String> {
         "r               refresh",
         "l               Live: refresh repeatedly",
         "p               power menu",
-        "a               add host (Hosts screen)",
+        "a, w            add host, its password",
         "S               full screen console",
         "?               this help",
         "q               quit",
@@ -505,15 +529,21 @@ fn draw_form(app: &mut App, c: &mut Canvas, form: &HostForm) {
     const LABEL: usize = 14;
     let w = 60.min(c.w);
     // Border, fields, advice, error, buttons, border.
-    let h = (FORM_FIELDS.len() + 6).min(c.h);
+    let shown_fields = form.fields().len();
+    let h = (shown_fields + 6).min(c.h);
     let r = Rect::new((c.w - w) / 2, (c.h - h) / 2, w, h);
     app.hits.clear();
     c.clear(r);
     c.frame(r);
-    c.text(r.x + 2, r.y, w - 4, " Add host ", Kind::Sel);
+    let title = match form.change.and_then(|i| app.hosts.get(i)) {
+        Some(host) => format!(" Saved password: {} ", host.label()),
+        None => " Add host ".to_string(),
+    };
+    c.text(r.x + 2, r.y, w - 4, &title, Kind::Sel);
     let room = w.saturating_sub(LABEL + 5);
-    for (i, label) in FORM_FIELDS.iter().enumerate() {
-        let y = r.y + 1 + i;
+    for (row, i) in form.fields().enumerate() {
+        let label = FORM_FIELDS[i];
+        let y = r.y + 1 + row;
         let value = if i == FORM_PASSWORD { "*".repeat(form.value(i).len()) } else { form.value(i).to_string() };
         let cursor = if i == form.field { "_" } else { "" };
         let shown = format!("{value}{cursor}");
@@ -524,9 +554,14 @@ fn draw_form(app: &mut App, c: &mut Canvas, form: &HostForm) {
         c.line(r.x + 2 + LABEL, y, room, tail, kind);
         app.hits.push((Rect::new(r.x + 2, y, w - 4, 1), Hit::Field(i)));
     }
-    let mut y = r.y + 1 + FORM_FIELDS.len();
+    let mut y = r.y + 1 + shown_fields;
     let (note, kind) = if form.error.is_empty() {
-        ("A password file is advised. A typed password is saved unencrypted. User is optional.".to_string(), Kind::Dim)
+        let note = if form.change.is_some() {
+            "This does not change the BMC. A file is advised; a typed one is unencrypted."
+        } else {
+            "A password file is advised. A typed password is saved unencrypted. User is optional."
+        };
+        (note.to_string(), Kind::Dim)
     } else {
         (form.error.clone(), Kind::Bad)
     };

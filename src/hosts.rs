@@ -244,6 +244,81 @@ pub fn add(path: &Path, pass_dir: &Path, n: &NewHost, bin: &str) -> Result<Targe
     }
 }
 
+// ----- changing the saved password of a host ----------------------------------
+
+/// The same rules for a password file or a typed password as when adding.
+pub fn validate_password(n: &NewHost) -> Result<(), String> {
+    validate(&NewHost { name: "x".into(), address: "x".into(), user: String::new(), pass_file: n.pass_file.clone(), password: n.password.clone() })
+}
+
+/// The result of changing a saved password.
+#[derive(Debug)]
+pub struct Changed {
+    pub target: Target,
+    /// A password file this program had written, deleted because no host uses
+    /// it any more.
+    pub removed: Option<PathBuf>,
+}
+
+/// Point the entry `n.name` of the list at another password file, or at a new
+/// file holding the typed password. Only `n.pass_file` or `n.password` is used.
+/// This changes what is saved on this computer, nothing on the BMC. Comments
+/// and layout of the list stay.
+pub fn set_password(path: &Path, pass_dir: &Path, n: &NewHost, bin: &str) -> Result<Changed, String> {
+    validate_password(n)?;
+    let shown = path.display().to_string();
+    check_private(&shown)?;
+    let old = std::fs::read_to_string(path).map_err(|e| format!("{shown}: {e}"))?;
+    let before = parse(&old, bin).map_err(|e| format!("{shown}: {e}"))?;
+    let at = before.iter().position(|h| h.name.as_ref() == Some(&n.name)).ok_or(format!("{shown} has no host named {}", n.name))?;
+    let old_file = before[at].pass_file.clone();
+    let mut doc: toml_edit::DocumentMut = old.parse().map_err(|e| format!("{shown}: {e}"))?;
+    // Fail before writing a password if the list can not be edited in place.
+    let entries = doc.get_mut("host").and_then(|h| h.as_array_of_tables_mut()).ok_or(format!("{shown}: only [[host]] entries can be changed here"))?;
+    if entries.len() <= at {
+        return Err(format!("{shown}: entry not found"));
+    }
+    let (pass_file, created) = if n.password.is_empty() {
+        check_private(&expand_home(&n.pass_file))?;
+        (n.pass_file.clone(), None)
+    } else {
+        let p = new_password_file(pass_dir, &n.name, &n.password)?;
+        (p.display().to_string(), Some(p))
+    };
+    let edited = entries.get_mut(at).and_then(|e| e.get_mut("pass_file")).and_then(|i| i.as_value_mut()).map(|item| {
+        // The decor holds a comment on the same line.
+        let decor = item.decor().clone();
+        *item = toml_edit::Value::from(pass_file.as_str());
+        *item.decor_mut() = decor;
+    });
+    let written = (|| {
+        edited.ok_or("entry has no pass_file")?;
+        let text = doc.to_string();
+        let all = parse(&text, bin)?;
+        replace_private(path, &text).map_err(|e| e.to_string())?;
+        Ok::<_, String>(all)
+    })();
+    let all = match written {
+        Ok(all) => all,
+        Err(e) => {
+            if let Some(p) = created {
+                let _ = std::fs::remove_file(p);
+            }
+            return Err(format!("{shown}: {e}"));
+        }
+    };
+    let target = all[at].clone();
+    // A replaced password must not stay on disk in plain text. Only a file in
+    // our own directory is deleted, and only when no host refers to it.
+    let removed = old_file.map(PathBuf::from).filter(|old| {
+        let same = |a: &Path, b: &Path| matches!((std::fs::canonicalize(a), std::fs::canonicalize(b)), (Ok(a), Ok(b)) if a == b);
+        let ours = old.parent().is_some_and(|d| same(d, pass_dir)) && !std::fs::symlink_metadata(old).is_ok_and(|m| m.is_symlink());
+        let used = all.iter().any(|h| h.pass_file.as_deref().is_some_and(|f| same(Path::new(f), old)));
+        ours && !used && std::fs::remove_file(old).is_ok()
+    });
+    Ok(Changed { target, removed })
+}
+
 /// Read the list and check the permissions of it and of every password file.
 pub fn load(path: &Path, bin: &str) -> Result<Vec<Target>, String> {
     let shown = path.display().to_string();
@@ -350,6 +425,44 @@ mod tests {
         let t = add(&list, &pass, &typed("../../x", "p"), "ipmitool").unwrap();
         assert_eq!(Path::new(&t.pass_file.unwrap()).parent(), Some(pass.as_path()));
         assert!(!format!("{:?}", typed("a", "topsecret")).contains("topsecret"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn set_password_edits_one_line_and_drops_only_its_own_old_file() {
+        let d = scratch("setpw");
+        let (list, pass) = (d.join("hosts.toml"), d.join("pass"));
+        add(&list, &pass, &typed("a", "old-a"), "ipmitool").unwrap();
+        let mine = d.join("my-own-pw");
+        std::fs::write(&mine, "p\n").unwrap();
+        std::fs::set_permissions(&mine, std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
+        let text = std::fs::read_to_string(&list).unwrap().replace("name = \"a\"", "name = \"a\" # the web box");
+        let text = format!("# top\n{text}\n[[host]]\nname='b'\naddress='h'\npass_file='{}' # keep\n", mine.display());
+        std::fs::write(&list, &text).unwrap();
+        // A typed password: a new file, and our old one is deleted.
+        let c = set_password(&list, &pass, &typed("a", "new-a"), "ipmitool").unwrap();
+        let new_file = PathBuf::from(c.target.pass_file.clone().unwrap());
+        assert_eq!(std::fs::read_to_string(&new_file).unwrap(), "new-a\n");
+        assert_eq!(c.removed.as_deref(), Some(pass.join("a").as_path()));
+        assert!(!pass.join("a").exists() && mode(&new_file) == 0o600 && mode(&list) == 0o600);
+        let after = std::fs::read_to_string(&list).unwrap();
+        assert!(after.starts_with("# top\n") && after.contains("# the web box") && after.contains("# keep") && !after.contains("new-a"));
+        // A file of the user's own is never deleted.
+        let c = set_password(&list, &pass, &typed("b", "x"), "ipmitool").unwrap();
+        assert!(c.removed.is_none() && mine.exists());
+        // A file of ours that another host still uses stays.
+        let shared = NewHost { pass_file: new_file.display().to_string(), ..typed("b", "") };
+        set_password(&list, &pass, &shared, "ipmitool").unwrap();
+        let back = NewHost { pass_file: mine.display().to_string(), ..typed("a", "") };
+        let c = set_password(&list, &pass, &back, "ipmitool").unwrap();
+        assert!(c.removed.is_none() && new_file.exists(), "b still uses it");
+        assert!(std::fs::read_to_string(&list).unwrap().contains("# keep"));
+        // Errors change nothing and leave no password file behind.
+        let (before, files) = (std::fs::read_to_string(&list).unwrap(), std::fs::read_dir(&pass).unwrap().count());
+        for bad in [typed("nobody", "p"), typed("a", ""), NewHost { pass_file: "/nonexistent".into(), ..typed("a", "") }] {
+            assert!(set_password(&list, &pass, &bad, "ipmitool").is_err());
+        }
+        assert_eq!((std::fs::read_to_string(&list).unwrap(), std::fs::read_dir(&pass).unwrap().count()), (before, files));
         let _ = std::fs::remove_dir_all(&d);
     }
 

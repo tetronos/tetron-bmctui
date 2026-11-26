@@ -121,3 +121,34 @@ fn version_flag() {
     assert!(o.status.success());
     assert_eq!(text(&o), format!("tetron-bmctui {}\n", env!("CARGO_PKG_VERSION")));
 }
+
+#[test]
+fn saved_hosts_are_kept_next_to_a_command_line_host() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = std::env::temp_dir().join(format!("tetron-bmctui-merge-{}", std::process::id()));
+    let cfg = dir.join("tetron-bmctui");
+    std::fs::create_dir_all(&cfg).unwrap();
+    let write = |p: &std::path::Path, text: &str, mode: u32| {
+        std::fs::write(p, text).unwrap();
+        std::fs::set_permissions(p, std::fs::Permissions::from_mode(mode)).unwrap();
+    };
+    let pw = dir.join("pw");
+    write(&pw, "s3cret\n", 0o600);
+    let list = cfg.join("hosts.toml");
+    write(&list, &format!("[[host]]\nname='saved'\naddress='10.0.0.2'\npass_file='{}'\n", pw.display()), 0o600);
+    let run = |extra: &[&str]| {
+        let mut c = Command::new(bin());
+        c.args(["--ipmitool", &fake(), "--dump", "hosts", "-H", "10.0.0.9", "--pass-file", pw.to_str().unwrap()]).args(extra);
+        c.env_remove("BMC_HOST").env_remove("BMC_USER").env("XDG_CONFIG_HOME", &dir);
+        c.output().unwrap()
+    };
+    let t = text(&run(&[]));
+    assert!(t.contains("* 10.0.0.9") && t.contains("  saved"), "{t}");
+    assert!(text(&run(&["--select", "saved"])).contains("* saved"));
+    assert_eq!(run(&["--select", "nobody"]).status.code(), Some(2));
+    // A broken list does not stop the named host.
+    write(&list, "nonsense", 0o600);
+    let o = run(&[]);
+    assert!(o.status.success() && text(&o).contains("* 10.0.0.9"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
