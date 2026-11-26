@@ -7,7 +7,7 @@
 //!   97 to 119             navigation, main; details on request
 //!   below 97              one pane; navigation opens as an overlay
 
-use crate::app::{App, Hit, Mode, NAV, Pane, Then};
+use crate::app::{App, FORM_FIELDS, FORM_PASSWORD, Hit, HostForm, Mode, NAV, Pane, Then};
 use crate::canvas::{Canvas, Rect, TermStyle};
 use crate::ipmi::{self, Screen};
 use crate::view::{self, Kind, wrap};
@@ -363,6 +363,9 @@ fn draw_details(app: &mut App, c: &mut Canvas, r: Rect) {
     for (row, (text, kind)) in lines.iter().skip(app.detail_scroll).take(app.detail_rows).enumerate() {
         c.text(a.x + 1, a.y + row, width, text, *kind);
     }
+    if app.screen == Screen::Hosts && a.h > 2 {
+        button(app, c, a.x + 1, a.y + a.h - 1, "[ Add host ]", Hit::AddHost, Kind::Head);
+    }
     if has_run {
         // The button is greyed while locked. It still reacts, with the reason.
         let kind = if app.unlocked { Kind::Sel } else { Kind::Dim };
@@ -412,6 +415,9 @@ fn key_hints(app: &mut App, c: &mut Canvas, y: usize) {
         // are left out, and help lists all keys.
         hints.push(("? help", KeyCode::Char('?')));
         hints.push(("q quit", KeyCode::Char('q')));
+        if app.screen == Screen::Hosts {
+            hints.push(("a add host", KeyCode::Char('a')));
+        }
         if app.screen == Screen::Console && !app.console_live() {
             hints.push(("Enter connect", KeyCode::Enter));
             hints.push(("S full screen", KeyCode::Char('S')));
@@ -450,6 +456,7 @@ fn help_text(app: &App) -> Vec<String> {
         "d               show or hide details",
         "r               refresh",
         "p               power menu",
+        "a               add host (Hosts screen)",
         "S               full screen console",
         "?               this help",
         "q               quit",
@@ -475,6 +482,47 @@ fn help_text(app: &App) -> Vec<String> {
         "Writes are recorded in the audit log.".into(),
     ]);
     v
+}
+
+/// The form that adds a host. It fits the smallest terminal.
+fn draw_form(app: &mut App, c: &mut Canvas, form: &HostForm) {
+    const LABEL: usize = 14;
+    let w = 60.min(c.w);
+    // Border, fields, advice, error, buttons, border.
+    let h = (FORM_FIELDS.len() + 6).min(c.h);
+    let r = Rect::new((c.w - w) / 2, (c.h - h) / 2, w, h);
+    app.hits.clear();
+    c.clear(r);
+    c.frame(r);
+    c.text(r.x + 2, r.y, w - 4, " Add host ", Kind::Sel);
+    let room = w.saturating_sub(LABEL + 5);
+    for (i, label) in FORM_FIELDS.iter().enumerate() {
+        let y = r.y + 1 + i;
+        let value = if i == FORM_PASSWORD { "*".repeat(form.value(i).len()) } else { form.value(i).to_string() };
+        let cursor = if i == form.field { "_" } else { "" };
+        let shown = format!("{value}{cursor}");
+        // The end of a long value is shown, where the typing happens.
+        let tail = &shown[shown.len().saturating_sub(room)..];
+        c.text(r.x + 2, y, LABEL, label, Kind::Dim);
+        let kind = if i == form.field { Kind::Sel } else { Kind::Normal };
+        c.line(r.x + 2 + LABEL, y, room, tail, kind);
+        app.hits.push((Rect::new(r.x + 2, y, w - 4, 1), Hit::Field(i)));
+    }
+    let mut y = r.y + 1 + FORM_FIELDS.len();
+    let (note, kind) = if form.error.is_empty() {
+        ("A password file is advised. A typed password is saved unencrypted. User is optional.".to_string(), Kind::Dim)
+    } else {
+        (form.error.clone(), Kind::Bad)
+    };
+    for line in wrap(&note, w - 4).iter().take(3) {
+        if y < r.y + h - 2 {
+            c.text(r.x + 2, y, w - 4, line, kind);
+            y += 1;
+        }
+    }
+    let by = r.y + h - 2;
+    let x = button(app, c, r.x + 2, by, "[ Save ]", Hit::DialogOk, Kind::Head) + 3;
+    button(app, c, x, by, "[ Cancel (Esc) ]", Hit::DialogCancel, Kind::Head);
 }
 
 /// The power menu. The screen behind it stays visible and keeps updating.
@@ -530,13 +578,28 @@ fn draw_help(app: &mut App, c: &mut Canvas) {
 /// Draw the open dialog on top of everything. It also replaces all clickable
 /// regions, so nothing behind it can be clicked.
 fn dialog(app: &mut App, c: &mut Canvas) {
+    if let Mode::AddHost(form) = &app.mode {
+        let form = form.clone();
+        return draw_form(app, c, &form);
+    }
     match app.mode {
         Mode::Help => return draw_help(app, c),
         Mode::Power => return draw_power(app, c),
         _ => {}
     }
     let (title, text, ok, anchor) = match &app.mode {
-        Mode::Normal | Mode::Help | Mode::Power => return,
+        Mode::Normal | Mode::Help | Mode::Power | Mode::AddHost(_) => return,
+        Mode::SavePassword { form, anchor } => (
+            "Save password",
+            vec![
+                format!("Save the password of {} in a file?", form.host.name),
+                "It is NOT encrypted.".to_string(),
+                "Your account, an admin, or anyone with the unencrypted disk or a backup can read it.".to_string(),
+                "Own password file advised.".to_string(),
+            ],
+            "[ Save (y) ]",
+            *anchor,
+        ),
         Mode::Unlock { anchor, then } => (
             "Unlock",
             vec![

@@ -55,7 +55,11 @@ Run `tetron-bmctui --help` for all options.
 
 ## Several servers
 
-List your servers in `~/.config/tetron-bmctui/hosts.toml`:
+To add a server in the program, open the **Hosts** screen and press `a` or click `[ Add host ]`. Move between fields with `Tab` or by clicking. `Enter` goes to the next field and saves from the last one. Give either the path of a password file or the password itself.
+
+A password file that you manage is advised. If you type the password, the program warns you and asks for confirmation, then saves it in a new file in `~/.config/tetron-bmctui/pass/`. That file is **not encrypted**: it has mode 0600, but your account, an administrator or anyone with access to an unencrypted disk or backup can read it. The new entry is added to the end of your host list, and your comments are kept. If you started with `-H`, the entry is saved to the default list, which is used the next time you start without `-H`.
+
+You can also edit the list yourself. List your servers in `~/.config/tetron-bmctui/hosts.toml`:
 
 ```toml
 [[host]]
@@ -72,7 +76,7 @@ user = "ADMIN"
 pass_file = "~/.bmc-pass-db01"
 ```
 
-The list and every password file must have mode 0600 (`chmod 600`). The list holds no passwords, only the path of each password file.
+The list and every password file must have mode 0600 (`chmod 600`). The list itself holds no passwords, only the path of each password file.
 
 The list is used when neither `-H` nor `BMC_HOST` is given. `--hosts FILE` names another list and `--select NAME` chooses the first server. The top bar shows the IP and MAC address of the selected server's BMC when the terminal is wide enough; the Hosts screen shows them in its details too. Only the selected server is contacted, and each tab shows when its state was last checked.
 
@@ -90,6 +94,7 @@ You can click screens, host tabs, rows, buttons and key hints. The mouse wheel s
 | `1` to `9` | switch server |
 | `/` | filter sensors, events or inventory; `Esc` clears it |
 | `e` | export the screen |
+| `a` | add a server (Hosts screen) |
 | `d` | show or hide details |
 | `r` | refresh |
 | `S` | full screen serial console |

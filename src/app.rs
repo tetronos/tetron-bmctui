@@ -8,6 +8,7 @@
 
 use crate::canvas::Rect;
 use crate::console::{self, Console};
+use crate::hosts::{self, NewHost};
 use crate::ipmi::{self, Action, Risk, Screen, Target};
 use crate::view;
 use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -55,6 +56,9 @@ pub enum Hit {
     /// A host tab in the top bar, by index in `App::hosts`.
     Host(usize),
     /// The power button in the top bar, and an entry of the power menu.
+    /// The "add host" button, and a field of its form.
+    AddHost,
+    Field(usize),
     Power,
     PowerItem(usize),
     /// Console buttons: connect, and the commands that otherwise follow the
@@ -79,6 +83,10 @@ pub enum Mode {
     Unlock { anchor: Option<(usize, usize)>, then: Then },
     /// "Switch host?" Asked when it would disconnect a live console.
     SwitchHost { to: usize, anchor: Option<(usize, usize)> },
+    /// The form that adds a host.
+    AddHost(HostForm),
+    /// "Save the password in a file?" Cancelling goes back to the form.
+    SavePassword { form: HostForm, anchor: Option<(usize, usize)> },
     /// The power menu, on top of the open screen.
     Power,
     /// The list of keys.
@@ -86,6 +94,38 @@ pub enum Mode {
     /// "Run ACTION on HOST?" for sensitive actions.
     /// With `from_power`, cancelling goes back to the power menu.
     Confirm { act: Action, anchor: Option<(usize, usize)>, from_power: bool },
+}
+
+/// Labels of the fields of the add host form, in order.
+pub const FORM_FIELDS: [&str; 5] = ["Name", "Address", "User", "Password file", "or Password"];
+/// The password field, which is shown as stars.
+pub const FORM_PASSWORD: usize = 4;
+/// Longest text a field takes.
+const FIELD_MAX: usize = 128;
+
+#[derive(Clone, Debug, Default)]
+pub struct HostForm {
+    /// Its `Debug` output hides the password.
+    pub host: NewHost,
+    /// Index into `FORM_FIELDS`.
+    pub field: usize,
+    pub error: String,
+}
+
+impl HostForm {
+    pub fn value(&self, i: usize) -> &str {
+        [&self.host.name, &self.host.address, &self.host.user, &self.host.pass_file, &self.host.password][i]
+    }
+
+    fn value_mut(&mut self) -> &mut String {
+        match self.field {
+            0 => &mut self.host.name,
+            1 => &mut self.host.address,
+            2 => &mut self.host.user,
+            3 => &mut self.host.pass_file,
+            _ => &mut self.host.password,
+        }
+    }
 }
 
 /// What follows the unlock dialog. Unlocking never runs an action by itself.
@@ -179,6 +219,8 @@ pub struct App {
     pub help_scroll: usize,
     /// Selected entry of the power menu.
     pub power_cursor: usize,
+    /// A checked form that the main loop writes to the host list.
+    pub want_add: Option<HostForm>,
     /// The main loop writes the open screen to a file when set.
     pub want_export: bool,
     pub efi_boot: bool,
@@ -238,6 +280,7 @@ impl App {
             filtering: false,
             help_scroll: 0,
             power_cursor: 0,
+            want_add: None,
             want_export: false,
             efi_boot: false,
             quit: false,
@@ -422,6 +465,73 @@ impl App {
         // The host screen stays as it is. Other screens are fetched again.
         if self.screen != Screen::Hosts {
             self.switch(self.screen);
+        }
+    }
+
+    // ----- adding a host ----------------------------------------------------
+
+    pub fn open_add_host(&mut self) {
+        self.mode = Mode::AddHost(HostForm::default());
+    }
+
+    /// Save was chosen. A typed password is written to disk only after a
+    /// warning and a confirmation.
+    fn submit_host(&mut self) {
+        let Mode::AddHost(mut form) = std::mem::replace(&mut self.mode, Mode::Normal) else { return };
+        let taken = self.hosts.iter().any(|h| h.name.as_ref() == Some(&form.host.name));
+        let checked = hosts::validate(&form.host).and_then(|()| if taken { Err("that name is already in use".into()) } else { Ok(()) });
+        match checked {
+            Err(e) => {
+                form.error = e;
+                self.mode = Mode::AddHost(form);
+            }
+            Ok(()) if form.host.password.is_empty() => self.want_add = Some(form),
+            Ok(()) => self.mode = Mode::SavePassword { form, anchor: self.pointer },
+        }
+    }
+
+    /// The main loop reports the result of writing the list. The new host is
+    /// not contacted until it is selected.
+    pub fn host_added(&mut self, mut form: HostForm, r: Result<Target, String>) {
+        match r {
+            Ok(t) => {
+                self.status = format!("added host {}", t.describe());
+                self.hosts.push(t);
+                self.states.push(HostState::default());
+                if self.screen == Screen::Hosts {
+                    self.cursor = self.hosts.len();
+                    self.follow_cursor();
+                }
+            }
+            Err(e) => {
+                form.error = e;
+                self.mode = Mode::AddHost(form);
+            }
+        }
+    }
+
+    fn form_key(&mut self, code: KeyCode, mods: KeyModifiers) {
+        let Mode::AddHost(form) = &mut self.mode else { return };
+        let last = FORM_FIELDS.len() - 1;
+        match code {
+            KeyCode::Esc => self.dialog_cancel(),
+            KeyCode::Tab | KeyCode::Down => form.field = (form.field + 1) % FORM_FIELDS.len(),
+            KeyCode::BackTab | KeyCode::Up => form.field = (form.field + last) % FORM_FIELDS.len(),
+            // Enter walks through the fields and saves from the last one.
+            KeyCode::Enter if form.field < last => form.field += 1,
+            KeyCode::Enter => self.submit_host(),
+            KeyCode::Backspace => {
+                form.value_mut().pop();
+                form.error.clear();
+            }
+            KeyCode::Char(c) if !mods.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
+                let max = if form.field == FORM_PASSWORD { hosts::PASSWORD_MAX } else { FIELD_MAX };
+                if (c == ' ' || c.is_ascii_graphic()) && form.value_mut().len() < max {
+                    form.value_mut().push(c);
+                    form.error.clear();
+                }
+            }
+            _ => {}
         }
     }
 
@@ -976,6 +1086,12 @@ impl App {
                 }
             }
             Mode::SwitchHost { to, .. } => self.switch_host(to),
+            // The form's own button.
+            Mode::AddHost(form) => {
+                self.mode = Mode::AddHost(form);
+                self.submit_host();
+            }
+            Mode::SavePassword { form, .. } => self.want_add = Some(form),
             Mode::Help => self.mode = Mode::Help,
             Mode::Power => self.mode = Mode::Power,
             Mode::Normal => {}
@@ -983,12 +1099,13 @@ impl App {
     }
 
     fn dialog_cancel(&mut self) {
-        self.mode = match self.mode {
-            Mode::Help => {
-                self.mode = Mode::Normal;
-                return;
+        self.mode = match std::mem::replace(&mut self.mode, Mode::Normal) {
+            Mode::Help => return,
+            Mode::Power => {
+                self.mode = Mode::Power;
+                return self.power_menu_key(KeyCode::Esc);
             }
-            Mode::Power => return self.power_menu_key(KeyCode::Esc),
+            Mode::SavePassword { form, .. } => Mode::AddHost(form),
             // One step back, to the menu the dialog was opened from.
             Mode::Confirm { from_power: true, .. } | Mode::Unlock { then: Then::PowerMenu, .. } => Mode::Power,
             _ => Mode::Normal,
@@ -1026,6 +1143,9 @@ impl App {
         if matches!(self.mode, Mode::Power) {
             return self.power_menu_key(code);
         }
+        if matches!(self.mode, Mode::AddHost(_)) {
+            return self.form_key(code, mods);
+        }
         // A dialog takes all other keys. Enter alone deliberately does nothing.
         if !matches!(self.mode, Mode::Normal) {
             match code {
@@ -1044,6 +1164,7 @@ impl App {
             KeyCode::Char('/') => self.start_filter(),
             KeyCode::Char('e') => self.export(),
             KeyCode::Char('p') => self.open_power_menu(),
+            KeyCode::Char('a') if self.screen == Screen::Hosts => self.open_add_host(),
             // Esc first removes a filter that is in effect.
             KeyCode::Esc if !self.filter.is_empty() => self.clear_filter(),
             KeyCode::Char('q') => self.quit = true,
@@ -1130,6 +1251,11 @@ impl App {
         if !matches!(self.mode, Mode::Normal) {
             match h {
                 Hit::PowerItem(i) if matches!(self.mode, Mode::Power) => self.pick_power(i),
+                Hit::Field(i) => {
+                    if let Mode::AddHost(form) = &mut self.mode {
+                        form.field = i;
+                    }
+                }
                 Hit::DialogOk => self.dialog_ok(),
                 Hit::DialogCancel => self.dialog_cancel(),
                 _ => {}
@@ -1166,6 +1292,8 @@ impl App {
             }
             Hit::Host(i) => self.request_host(i),
             Hit::Power => self.open_power_menu(),
+            Hit::AddHost => self.open_add_host(),
+            Hit::Field(_) => {}
             // Only drawn while the menu is open, which is handled above.
             Hit::PowerItem(_) => {}
             Hit::Run => self.pick(),
@@ -1649,6 +1777,104 @@ mod tests {
         assert!(!ui::draw(&mut a, 120, 28).row(0).contains("192.0.2.10"));
         a.switch_host(0);
         assert!(ui::draw(&mut a, 120, 28).row(0).contains("192.0.2.10"), "kept per host");
+    }
+
+    fn type_text(a: &mut App, text: &str) {
+        for c in text.chars() {
+            press(a, KeyCode::Char(c));
+        }
+    }
+
+    /// Fill the form with the keyboard, from the name down to the password.
+    fn fill(a: &mut App, values: [&str; 5]) {
+        for (i, v) in values.iter().enumerate() {
+            type_text(a, v);
+            if i < 4 {
+                press(a, KeyCode::Tab);
+            }
+        }
+    }
+
+    #[test]
+    fn add_host_with_a_password_warns_and_confirms() {
+        let mut a = two_hosts();
+        a.switch(Screen::Hosts);
+        ui::draw(&mut a, 120, 28);
+        press(&mut a, KeyCode::Char('a'));
+        // Letters that are commands elsewhere are text in the form.
+        fill(&mut a, ["quip", "192.0.2.9", "ADMIN", "", "hunter2y"]);
+        assert!(!a.quit && !a.unlocked);
+        let c = ui::draw(&mut a, 120, 28);
+        let screen: String = (0..28).map(|y| c.row(y)).collect();
+        assert!(!screen.contains("hunter2y") && screen.contains("********"), "hidden while typed");
+        assert!(!format!("{:?}", a.mode).contains("hunter2y"));
+        press(&mut a, KeyCode::Enter);
+        assert!(matches!(a.mode, Mode::SavePassword { .. }) && a.want_add.is_none());
+        press(&mut a, KeyCode::Enter);
+        assert!(a.want_add.is_none(), "Enter alone must not save a password");
+        let c = ui::draw(&mut a, 120, 28);
+        assert!((0..28).any(|y| c.row(y).contains("NOT encrypted")));
+        press(&mut a, KeyCode::Esc);
+        assert!(matches!(a.mode, Mode::AddHost(_)), "back to the form");
+        press(&mut a, KeyCode::Enter);
+        press(&mut a, KeyCode::Char('y'));
+        let form = a.want_add.take().unwrap();
+        assert_eq!((form.host.name.as_str(), form.host.password.as_str()), ("quip", "hunter2y"));
+        // A failed write brings the form back with the reason.
+        a.host_added(form.clone(), Err("disk full".into()));
+        assert!(matches!(&a.mode, Mode::AddHost(f) if f.error == "disk full" && f.host.name == "quip"));
+        a.mode = Mode::Normal;
+        let t = Target { name: Some("quip".into()), ..a.t.clone() };
+        a.host_added(form, Ok(t));
+        assert_eq!((a.hosts.len(), a.states.len(), a.current, a.cursor), (3, 3, 0, 3));
+    }
+
+    #[test]
+    fn add_host_by_mouse_with_a_password_file() {
+        let mut a = two_hosts();
+        a.switch(Screen::Hosts);
+        ui::draw(&mut a, 120, 28);
+        click(&mut a, Hit::AddHost);
+        click(&mut a, Hit::DialogOk);
+        assert!(matches!(&a.mode, Mode::AddHost(f) if f.error.contains("needed")));
+        for (i, v) in [(0, "three"), (1, "h3"), (3, "~/pw")] {
+            click(&mut a, Hit::Field(i));
+            type_text(&mut a, v);
+        }
+        click(&mut a, Hit::DialogOk);
+        assert!(a.want_add.is_some() && matches!(a.mode, Mode::Normal), "no password, no warning");
+        // Cancel leaves everything as it was. A name in use is refused.
+        a.want_add = None;
+        click(&mut a, Hit::AddHost);
+        fill(&mut a, ["two", "h", "", "/p", ""]);
+        press(&mut a, KeyCode::Enter);
+        assert!(matches!(&a.mode, Mode::AddHost(f) if f.error.contains("already in use")));
+        click(&mut a, Hit::DialogCancel);
+        assert!(matches!(a.mode, Mode::Normal) && a.want_add.is_none());
+    }
+
+    #[test]
+    fn add_host_fits_small_terminals() {
+        let mut a = two_hosts();
+        a.switch(Screen::Hosts);
+        for (w, h) in [(40, 12), (80, 24)] {
+            a.mode = Mode::Normal;
+            ui::draw(&mut a, w, h);
+            assert!(a.hits.iter().any(|(_, k)| *k == Hit::Key(KeyCode::Char('a'))), "hint at {w}x{h}");
+            a.open_add_host();
+            ui::draw(&mut a, w, h);
+            for i in 0..FORM_FIELDS.len() {
+                assert!(a.hits.iter().any(|(_, k)| *k == Hit::Field(i)), "field {i} at {w}x{h}");
+            }
+            assert!(a.hits.iter().any(|(_, k)| *k == Hit::DialogOk) && a.hits.iter().any(|(_, k)| *k == Hit::DialogCancel));
+            // The whole warning is readable, down to its last words.
+            let mut host = NewHost { name: "a".into(), address: "h".into(), password: "p".into(), ..Default::default() };
+            host.user = "u".into();
+            a.mode = Mode::SavePassword { form: HostForm { host, ..Default::default() }, anchor: None };
+            let c = ui::draw(&mut a, w, h);
+            let text: String = (0..h).map(|y| c.row(y)).collect();
+            assert!(text.contains("NOT encrypted") && text.contains("advised"), "{w}x{h}");
+        }
     }
 
     #[test]

@@ -274,6 +274,7 @@ fn hosts_screen(c: &Ctx) -> Vec<Line> {
     }
     v.push((String::new(), Kind::Normal));
     v.push(("Enter or click selects a host. Switching locks writes.".into(), Kind::Dim));
+    v.push(("a or [ Add host ] adds one.".into(), Kind::Dim));
     v
 }
 

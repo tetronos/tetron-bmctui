@@ -69,6 +69,7 @@ Keys (? lists them in the program):
   1 to 9              switch host
   /  e  r  d          filter, export, refresh, details
   S                   full screen serial console
+  a                   add a host (on the Hosts screen)
   q                   quit
 
 Serial console: Enter on the Console screen connects, after unlock. Keys then
@@ -93,6 +94,8 @@ struct Opts {
     console: console::Settings,
     prefix: u8,
     efi_boot: bool,
+    /// Where added hosts are saved: the list in use, or the default one.
+    list_path: Option<PathBuf>,
     console_mono: bool,
     export_dir: Option<PathBuf>,
 }
@@ -184,6 +187,7 @@ fn parse_args() -> Result<Opts, String> {
     if list.is_none() && t.host.is_none() {
         list = hosts::default_path().filter(|p| p.exists());
     }
+    let list_path = list.clone().or_else(hosts::default_path);
     let (hosts, current) = match list {
         Some(path) => {
             if single_flags {
@@ -209,7 +213,7 @@ fn parse_args() -> Result<Opts, String> {
             (vec![t], 0)
         }
     };
-    Ok(Opts { hosts, current, dump, relock, console, prefix, efi_boot, console_mono, export_dir })
+    Ok(Opts { hosts, current, dump, relock, console, prefix, efi_boot, console_mono, export_dir, list_path })
 }
 
 /// Raw mode, alternate screen and mouse capture. Dropping the guard restores
@@ -265,6 +269,24 @@ fn execute_action(app: &mut App, tx: &Sender<Msg>, a: Action) {
     });
 }
 
+/// Write a new host to the list. Typed passwords always go below the default
+/// configuration directory, not beside a list kept somewhere else.
+fn add_host(app: &mut App, form: app::HostForm, list: Option<&Path>) {
+    let pass_dir = hosts::default_path().and_then(|p| p.parent().map(|d| d.join("pass")));
+    let (Some(list), Some(pass_dir)) = (list, pass_dir) else {
+        app.host_added(form, Err("no HOME for the host list".into()));
+        return;
+    };
+    let r = hosts::add(list, &pass_dir, &form.host, &app.t.bin);
+    let added = r.as_ref().ok().map(|t| t.describe());
+    app.host_added(form, r);
+    if let Some(who) = added {
+        // Only the fact is logged, never what was typed besides name and address.
+        let _ = ipmi::audit(&who, "added to the host list");
+        app.status = format!("added {who} to {}", list.display());
+    }
+}
+
 /// Save the open screen, as filtered, and say where.
 fn export_screen(app: &mut App, dir: Option<&Path>) {
     let Some(dir) = dir else {
@@ -313,7 +335,7 @@ fn redraw(app: &mut App, out: &mut impl Write) -> io::Result<()> {
 }
 
 fn run(opts: Opts) -> io::Result<()> {
-    let Opts { hosts, current, relock, console, prefix, efi_boot, console_mono, export_dir, .. } = opts;
+    let Opts { hosts, current, relock, console, prefix, efi_boot, console_mono, export_dir, list_path, .. } = opts;
     let export_dir = export_dir.or_else(|| ipmi::state_dir().map(|d| d.join("exports")));
     let (tx, rx): (Sender<Msg>, Receiver<Msg>) = mpsc::channel();
     let mut app = App::new(hosts, current, relock, tx.clone());
@@ -355,6 +377,10 @@ fn run(opts: Opts) -> io::Result<()> {
         }
         for a in std::mem::take(&mut app.queue) {
             execute_action(&mut app, &tx, a);
+            dirty = true;
+        }
+        if let Some(form) = app.want_add.take() {
+            add_host(&mut app, form, list_path.as_deref());
             dirty = true;
         }
         if app.want_export {
