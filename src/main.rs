@@ -1,6 +1,7 @@
 //! tetron-bmctui: terminal UI for server BMCs around ipmitool (Supermicro first).
 
 mod app;
+mod bmcpw;
 mod canvas;
 mod console;
 mod export;
@@ -77,6 +78,7 @@ Keys (? lists them in the program):
   l                   Live: refresh Overview or Sensors repeatedly
   S                   full screen serial console
   a, w                add a host, change its saved password (Hosts screen)
+  c                   change a password on the BMC (Hosts screen)
   q                   quit
 
 Serial console: Enter on the Console screen connects, after unlock. Keys then
@@ -312,11 +314,68 @@ fn execute_action(app: &mut App, tx: &Sender<Msg>, a: Action) {
     });
 }
 
+/// The directory of password files that this program writes.
+fn pass_dir() -> Option<PathBuf> {
+    hosts::default_path().and_then(|p| p.parent().map(|d| d.join("pass")))
+}
+
+/// The file and network side of the BMC password form.
+fn password_job(app: &mut App, tx: &Sender<Msg>, job: bmcpw::Job, changers: &mut Vec<JoinHandle<()>>) {
+    let (t, tx, epoch) = (app.t.clone(), tx.clone(), app.epoch);
+    match job {
+        bmcpw::Job::Check(typed) => {
+            let r = bmcpw::current_password(&t).map(|real| real == typed);
+            if app.pw_checked(r) {
+                std::thread::spawn(move || {
+                    let _ = tx.send(Msg::Users(epoch, bmcpw::fetch_users(&t)));
+                });
+            }
+        }
+        bmcpw::Job::Change(user, password) => {
+            let (host, dir) = (app.current, pass_dir());
+            changers.push(std::thread::spawn(move || {
+                let out = match dir {
+                    Some(d) => bmcpw::change(&t, &user, &password, &d, &ipmi::audit),
+                    None => bmcpw::Outcome { problem: Some("nothing was sent: no HOME for the password file".into()), ..Default::default() },
+                };
+                let _ = tx.send(Msg::PasswordChanged(host, user, out));
+            }));
+        }
+    }
+}
+
+/// The new password is verified: let the host use its file from now on.
+fn adopt_password(app: &mut App, list: Option<&Path>, host: usize, user: &bmcpw::User, file: &Path) {
+    let Some(old) = app.hosts.get(host).cloned() else { return };
+    let new = Target { pass_file: Some(file.display().to_string()), ..old.clone() };
+    // A host of the list is updated there. One from the command line only for
+    // this run: the program does not write to files it was given.
+    let listed = match (&old.name, list, pass_dir()) {
+        (Some(name), Some(list), Some(dir)) => {
+            let entry = hosts::NewHost { name: name.clone(), pass_file: file.display().to_string(), ..Default::default() };
+            Some(hosts::set_password(list, &dir, &entry, &app.t.bin))
+        }
+        _ => None,
+    };
+    let (target, note) = match listed {
+        Some(Ok(c)) => {
+            let gone = if c.removed.is_some() { " The old file that this program had written is deleted." } else { "" };
+            (c.target, format!("This host now uses {}.{gone} Other hosts with an old copy of the password are not changed.", file.display()))
+        }
+        Some(Err(e)) => (new, format!("The host list could not be updated ({e}). The new password is in {}: set it with Saved pw.", file.display())),
+        None => {
+            let own = old.pass_file.unwrap_or_else(|| "IPMI_PASSWORD".to_string());
+            (new, format!("This run now uses {}. {own} still holds the OLD password: update it before the next start.", file.display()))
+        }
+    };
+    let _ = ipmi::audit(&target.describe(), &format!("new password file adopted for user id {}", user.id));
+    app.adopt_password(host, target, note);
+}
+
 /// Write a new host to the list. Typed passwords always go below the default
 /// configuration directory, not beside a list kept somewhere else.
 fn add_host(app: &mut App, form: app::HostForm, list: Option<&Path>) {
-    let pass_dir = hosts::default_path().and_then(|p| p.parent().map(|d| d.join("pass")));
-    let (Some(list), Some(pass_dir)) = (list, pass_dir) else {
+    let (Some(list), Some(pass_dir)) = (list, pass_dir()) else {
         app.host_added(form, Err("no HOME for the host list".into()));
         return;
     };
@@ -406,6 +465,8 @@ fn run(opts: Opts) -> io::Result<()> {
         app.start_unchosen();
     }
     app.console_mono = console_mono;
+    // A password change that is running. It is waited for before exit.
+    let mut changers: Vec<JoinHandle<()>> = vec![];
     // Threads that are ending console sessions.
     let mut closers: Vec<JoinHandle<()>> = vec![];
     app.start_vendor();
@@ -450,6 +511,14 @@ fn run(opts: Opts) -> io::Result<()> {
             add_host(&mut app, form, list_path.as_deref());
             dirty = true;
         }
+        if let Some(job) = app.want_pw.take() {
+            password_job(&mut app, &tx, job, &mut changers);
+            dirty = true;
+        }
+        if let Some((host, user, file)) = app.want_adopt.take() {
+            adopt_password(&mut app, list_path.as_deref(), host, &user, &file);
+            dirty = true;
+        }
         if app.want_export {
             app.want_export = false;
             export_screen(&mut app, export_dir.as_deref());
@@ -483,6 +552,26 @@ fn run(opts: Opts) -> io::Result<()> {
         closers.push(std::thread::spawn(move || c.close()));
     }
     drop(_g);
+    if changers.iter().any(|c| !c.is_finished()) {
+        println!("a password change is still running, waiting for it ...");
+    }
+    for c in changers {
+        let _ = c.join();
+    }
+    // The result arrived while quitting: it must not be lost.
+    while let Ok(m) = rx.try_recv() {
+        if matches!(m, Msg::PasswordChanged(..)) {
+            app.on_msg(m);
+            if let Some((host, user, file)) = app.want_adopt.take() {
+                adopt_password(&mut app, list_path.as_deref(), host, &user, &file);
+            }
+            if let app::Mode::Report(lines) = &app.mode {
+                for l in lines {
+                    println!("{l}");
+                }
+            }
+        }
+    }
     if !closers.is_empty() {
         println!("closing the console session ...");
     }

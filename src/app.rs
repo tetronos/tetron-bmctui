@@ -6,6 +6,7 @@
 //! Actions are not run here either. They are put in `queue`, and the main loop
 //! runs them. Tests can therefore check what would run without running it.
 
+use crate::bmcpw;
 use crate::canvas::Rect;
 use crate::console::{self, Console};
 use crate::hosts::{self, NewHost};
@@ -65,6 +66,11 @@ pub enum Hit {
     /// A host tab in the top bar, by index in `App::hosts`.
     Host(usize),
     /// The power button in the top bar, and an entry of the power menu.
+    /// The BMC password button, a field of its form and the arrows that choose
+    /// the user.
+    ChangeBmcPassword,
+    PwField(usize),
+    PwUser(isize),
     /// The Live button of the open screen.
     Live,
     /// The buttons below the host list, and a field of their forms.
@@ -97,6 +103,11 @@ pub enum Mode {
     Unlock { anchor: Option<(usize, usize)>, then: Then },
     /// "Switch host?" Asked when it would disconnect a live console.
     SwitchHost { to: usize, anchor: Option<(usize, usize)> },
+    /// Changing a password on the BMC: the form, its confirmation, and the
+    /// report of what happened.
+    BmcPassword(bmcpw::Form),
+    ConfirmBmcPassword { form: bmcpw::Form, anchor: Option<(usize, usize)> },
+    Report(Vec<String>),
     /// The form that adds a host.
     AddHost(HostForm),
     /// "Save the password in a file?" Cancelling goes back to the form.
@@ -176,6 +187,8 @@ pub enum Then {
     Connect,
     /// Back to the power menu, also when cancelled.
     PowerMenu,
+    /// On to the BMC password form.
+    BmcPassword,
 }
 
 /// Results coming back from worker threads. Each carries the `epoch` it was
@@ -187,6 +200,10 @@ pub enum Msg {
     Done(u64, String, String, Result<String, String>),
     Vendor(u64, Option<u32>),
     Lan(u64, Option<ipmi::Lan>),
+    Users(u64, Result<Vec<bmcpw::User>, String>),
+    /// The result of a change: the host index, the user and what happened. It is
+    /// never dropped.
+    PasswordChanged(usize, bmcpw::User, bmcpw::Outcome),
 }
 
 /// What is remembered about a host while another one is in use.
@@ -281,6 +298,12 @@ pub struct App {
     pub power_cursor: usize,
     /// A checked form that the main loop writes to the host list.
     pub want_add: Option<HostForm>,
+    /// Password work for the main loop.
+    pub want_pw: Option<bmcpw::Job>,
+    /// A change is running: nothing else may talk to a BMC or write.
+    pub pw_busy: bool,
+    /// A verified new password file that the host list has to point to.
+    pub want_adopt: Option<(usize, bmcpw::User, std::path::PathBuf)>,
     /// The main loop writes the open screen to a file when set.
     pub want_export: bool,
     pub efi_boot: bool,
@@ -350,6 +373,9 @@ impl App {
             help_scroll: 0,
             power_cursor: 0,
             want_add: None,
+            want_pw: None,
+            pw_busy: false,
+            want_adopt: None,
             want_export: false,
             efi_boot: false,
             quit: false,
@@ -387,7 +413,7 @@ impl App {
 
     /// Fetch a screen in a worker thread. At most one fetch per screen runs.
     pub fn refresh(&mut self, s: Screen) {
-        if !self.chosen || matches!(s, Screen::Hosts | Screen::Console) || !self.loading.insert(s) {
+        if !self.chosen || self.pw_busy || matches!(s, Screen::Hosts | Screen::Console) || !self.loading.insert(s) {
             return;
         }
         self.last.insert(s, Instant::now());
@@ -400,7 +426,7 @@ impl App {
     /// Ask the BMC for its manufacturer id, which the fan screen depends on,
     /// and then for its own address.
     pub fn start_vendor(&mut self) {
-        if !self.chosen || self.vendor_pending {
+        if !self.chosen || self.pw_busy || self.vendor_pending {
             return;
         }
         self.vendor_pending = true;
@@ -420,6 +446,29 @@ impl App {
         match m {
             // Replies for a host that is no longer in use are dropped.
             Msg::Data(e, ..) | Msg::Vendor(e, _) | Msg::Lan(e, _) if e != self.epoch => {}
+            Msg::Users(e, r) => {
+                if e != self.epoch {
+                    return;
+                }
+                if let Mode::BmcPassword(form) = &mut self.mode
+                    && form.step == bmcpw::Step::Loading
+                {
+                    match r {
+                        Ok(users) => {
+                            // The login account is selected to begin with.
+                            form.user = users.iter().position(|u| bmcpw::is_login(&self.t, u)).unwrap_or(0);
+                            form.users = users;
+                            form.step = bmcpw::Step::Pick;
+                            form.field = bmcpw::PICK_USER;
+                        }
+                        Err(e) => {
+                            let why = e.lines().next().unwrap_or("").to_string();
+                            self.mode = Mode::Report(vec!["The BMC user list could not be read.".into(), why, "Nothing was changed.".into()]);
+                        }
+                    }
+                }
+            }
+            Msg::PasswordChanged(host, user, out) => self.password_result(host, user, out),
             Msg::Lan(_, lan) => {
                 // A failed read keeps what is already known.
                 if lan.is_some() {
@@ -551,6 +600,10 @@ impl App {
             self.status = format!("there is no host {}", i + 1);
             return;
         };
+        if self.pw_busy {
+            self.status = "wait: a password change is running".into();
+            return;
+        }
         let first = !self.chosen;
         if i == self.current && !first {
             return;
@@ -586,6 +639,182 @@ impl App {
             self.focus = self.pane_cycle().into_iter().find(|p| *p != Pane::Nav).unwrap_or(Pane::Main);
         } else if self.screen != Screen::Hosts {
             self.switch(self.screen);
+        }
+    }
+
+    // ----- the BMC password -------------------------------------------------
+
+    /// Start changing a password on the BMC of the host in use. It needs
+    /// unlock, and then the current password as an extra check.
+    pub fn open_bmc_password(&mut self) {
+        let why = if self.selected_host().is_some_and(|i| i != self.current) || !self.chosen {
+            "connect to that host first, then change its BMC password"
+        } else if self.pw_busy {
+            "wait: a password change is running"
+        } else if self.console_live() {
+            "disconnect the console first"
+        } else if !self.loading.is_empty() || self.vendor_pending {
+            "wait: the BMC is still being read, then try again"
+        } else if !self.unlocked {
+            self.mode = Mode::Unlock { anchor: self.pointer, then: Then::BmcPassword };
+            return;
+        } else {
+            self.live = false;
+            self.mode = Mode::BmcPassword(bmcpw::Form::default());
+            return;
+        };
+        self.status = why.into();
+    }
+
+    /// Next or Change in the form.
+    fn pw_submit(&mut self) {
+        let Mode::BmcPassword(form) = &mut self.mode else { return };
+        match form.step {
+            bmcpw::Step::Current if self.t.host.is_none() => {
+                // The local BMC has no login password to compare with.
+                if form.current == "localhost" {
+                    self.pw_checked(Ok(true));
+                } else {
+                    form.error = "type localhost to continue".into();
+                }
+            }
+            bmcpw::Step::Current if !form.current.is_empty() => {
+                self.want_pw = Some(bmcpw::Job::Check(form.current.clone()));
+            }
+            bmcpw::Step::Current => form.error = "type the current password".into(),
+            bmcpw::Step::Loading => {}
+            bmcpw::Step::Pick => match form.check_new() {
+                Ok(()) => {
+                    let form = form.clone();
+                    self.mode = Mode::ConfirmBmcPassword { form, anchor: self.pointer };
+                }
+                Err(e) => form.error = e,
+            },
+        }
+    }
+
+    /// The result of the safety check. True means the user list is wanted.
+    pub fn pw_checked(&mut self, r: Result<bool, String>) -> bool {
+        let Mode::BmcPassword(form) = &mut self.mode else { return false };
+        // Not kept longer than needed.
+        form.current.clear();
+        match r {
+            Ok(true) => {
+                form.step = bmcpw::Step::Loading;
+                form.error.clear();
+                true
+            }
+            Ok(false) => {
+                form.wrong_tries += 1;
+                form.error = "that is not the current password".into();
+                if form.wrong_tries >= 3 {
+                    self.lock("three wrong entries: password change closed, writes locked");
+                }
+                false
+            }
+            Err(e) => {
+                form.error = e;
+                false
+            }
+        }
+    }
+
+    fn pw_move_user(&mut self, delta: isize) {
+        if let Mode::BmcPassword(form) = &mut self.mode
+            && !form.users.is_empty()
+        {
+            let n = form.users.len() as isize;
+            form.user = (form.user as isize + delta).rem_euclid(n) as usize;
+            // What was typed was meant for the other user.
+            form.new.clear();
+            form.again.clear();
+            form.error.clear();
+        }
+    }
+
+    fn pw_key(&mut self, code: KeyCode, mods: KeyModifiers) {
+        let Mode::BmcPassword(form) = &mut self.mode else { return };
+        let picking = form.step == bmcpw::Step::Pick;
+        let fields = if picking { bmcpw::PICK_AGAIN + 1 } else { 1 };
+        match code {
+            KeyCode::Esc => self.dialog_cancel(),
+            KeyCode::Tab | KeyCode::Down => form.field = (form.field + 1) % fields,
+            KeyCode::BackTab | KeyCode::Up => form.field = (form.field + fields - 1) % fields,
+            KeyCode::Left if picking && form.field == bmcpw::PICK_USER => self.pw_move_user(-1),
+            KeyCode::Right if picking && form.field == bmcpw::PICK_USER => self.pw_move_user(1),
+            KeyCode::Enter if picking && form.field < bmcpw::PICK_AGAIN => form.field += 1,
+            KeyCode::Enter => self.pw_submit(),
+            KeyCode::Backspace => {
+                if let Some(t) = form.text_mut() {
+                    t.pop();
+                }
+                form.error.clear();
+            }
+            KeyCode::Char(c) if !mods.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) && (c == ' ' || c.is_ascii_graphic()) => {
+                if let Some(t) = form.text_mut()
+                    && t.len() < bmcpw::MAX
+                {
+                    t.push(c);
+                    form.error.clear();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Tell what happened and decide what the program does next.
+    fn password_result(&mut self, host: usize, user: bmcpw::User, out: bmcpw::Outcome) {
+        self.pw_busy = false;
+        let login = bmcpw::is_login(&self.t, &user);
+        let who = format!("user {} {}", user.id, user.name);
+        let saved = out.saved.as_ref().map(|p| p.display().to_string());
+        let mut lines: Vec<String> = vec![];
+        match (out.changed, login, out.verified) {
+            (true, false, _) => lines.push(format!("The BMC password of {who} was changed. How this program logs in is not affected.")),
+            (true, true, true) => lines.push(format!("The BMC password of {who} was changed and a login with it worked.")),
+            (true, true, false) => lines.push(format!("The BMC reported the password of {who} as changed, but it is not verified.")),
+            (false, ..) => lines.push(format!("The change for {who} was NOT confirmed. It may or may not have happened.")),
+        }
+        if let Some(p) = &out.problem {
+            lines.push(format!("Reason: {p}"));
+        }
+        match saved {
+            // The host is pointed at the new file by the main loop.
+            Some(_) if out.verified => {
+                if let Some(p) = out.saved.clone() {
+                    self.want_adopt = Some((host, user, p));
+                }
+            }
+            Some(p) => {
+                lines.push(format!("The new password is saved in {p}"));
+                lines.push("The host still uses the old one. Nothing is retried. Check which password works before trying again: repeated wrong logins can lock the account.".into());
+                // Requests with a password that may now be wrong must stop.
+                if let Some(s) = self.states.get_mut(host) {
+                    s.halt_auto = true;
+                }
+            }
+            None => {}
+        }
+        self.status = lines[0].clone();
+        self.mode = Mode::Report(lines);
+    }
+
+    /// Use the verified new password file for a host from now on. `old_kept`
+    /// says what happened in the host list.
+    pub fn adopt_password(&mut self, host: usize, target: Target, note: String) {
+        if host >= self.hosts.len() {
+            return;
+        }
+        self.hosts[host] = target.clone();
+        self.states[host] = HostState { lan: self.states[host].lan.take(), ..HostState::default() };
+        if host == self.current {
+            self.t = target;
+            self.epoch += 1;
+            self.loading.clear();
+            self.vendor_pending = false;
+        }
+        if let Mode::Report(lines) = &mut self.mode {
+            lines.push(note);
         }
     }
 
@@ -1245,6 +1474,10 @@ impl App {
         if self.needs_host() {
             return;
         }
+        if self.pw_busy {
+            self.status = "wait: a password change is running".into();
+            return;
+        }
         if self.unlocked {
             self.lock("locked: read-only");
         } else {
@@ -1286,6 +1519,8 @@ impl App {
 
     fn dialog_ok(&mut self) {
         match std::mem::replace(&mut self.mode, Mode::Normal) {
+            // No unlock while a change runs, so nothing else can be written.
+            Mode::Unlock { .. } if self.pw_busy => self.status = "wait: a password change is running".into(),
             Mode::Unlock { then, .. } => {
                 self.unlocked = true;
                 self.status = "writes unlocked".into();
@@ -1294,6 +1529,7 @@ impl App {
                     Then::Connect => self.want_connect = true,
                     // The entry stays selected and has to be chosen again.
                     Then::PowerMenu => self.mode = Mode::Power,
+                    Then::BmcPassword => self.open_bmc_password(),
                 }
             }
             Mode::Confirm { act, from_power, .. } => {
@@ -1311,6 +1547,21 @@ impl App {
                 self.submit_host();
             }
             Mode::SavePassword { form, .. } => self.want_add = Some(form),
+            Mode::BmcPassword(form) => {
+                self.mode = Mode::BmcPassword(form);
+                self.pw_submit();
+            }
+            Mode::ConfirmBmcPassword { form, .. } => {
+                let Some(user) = form.selected().cloned() else { return };
+                if self.unlocked {
+                    self.want_pw = Some(bmcpw::Job::Change(user, form.new));
+                    self.pw_busy = true;
+                    self.live = false;
+                    // Also keeps every other write out while this runs.
+                    self.lock("changing the BMC password ...");
+                }
+            }
+            Mode::Report(lines) => self.mode = Mode::Report(lines),
             Mode::Help => self.mode = Mode::Help,
             Mode::Power => self.mode = Mode::Power,
             Mode::Normal => {}
@@ -1319,7 +1570,9 @@ impl App {
 
     fn dialog_cancel(&mut self) {
         self.mode = match std::mem::replace(&mut self.mode, Mode::Normal) {
-            Mode::Help => return,
+            Mode::Help | Mode::Report(_) => return,
+            // One step back, to the entries.
+            Mode::ConfirmBmcPassword { form, .. } => Mode::BmcPassword(form),
             Mode::Power => {
                 self.mode = Mode::Power;
                 return self.power_menu_key(KeyCode::Esc);
@@ -1343,6 +1596,20 @@ impl App {
         self.prefix_pending = false;
         let typing = self.typing();
         match &mut self.mode {
+            Mode::BmcPassword(form) => {
+                let have = form.text_mut().map(|t| t.len());
+                if let Some(have) = have {
+                    match field_text(text, have, bmcpw::MAX) {
+                        Ok(t) => {
+                            if let Some(field) = form.text_mut() {
+                                field.push_str(t);
+                            }
+                            form.error.clear();
+                        }
+                        Err(why) => form.error = why,
+                    }
+                }
+            }
             Mode::AddHost(form) => {
                 let password = form.field == FORM_PASSWORD;
                 let max = if password { hosts::PASSWORD_MAX } else { FIELD_MAX };
@@ -1410,6 +1677,15 @@ impl App {
         if matches!(self.mode, Mode::AddHost(_)) {
             return self.form_key(code, mods);
         }
+        if matches!(self.mode, Mode::BmcPassword(_)) {
+            return self.pw_key(code, mods);
+        }
+        if matches!(self.mode, Mode::Report(_)) {
+            if matches!(code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q')) {
+                self.dialog_cancel();
+            }
+            return;
+        }
         // A dialog takes all other keys. Enter alone deliberately does nothing.
         if !matches!(self.mode, Mode::Normal) {
             match code {
@@ -1431,6 +1707,7 @@ impl App {
             KeyCode::Char('p') => self.open_power_menu(),
             KeyCode::Char('a') if self.screen == Screen::Hosts => self.open_add_host(),
             KeyCode::Char('w') if self.screen == Screen::Hosts => self.open_host_password(),
+            KeyCode::Char('c') if self.screen == Screen::Hosts => self.open_bmc_password(),
             // Esc first removes a filter that is in effect.
             KeyCode::Esc if !self.filter.is_empty() => self.clear_filter(),
             KeyCode::Char('q') => self.quit = true,
@@ -1520,6 +1797,12 @@ impl App {
         if !matches!(self.mode, Mode::Normal) {
             match h {
                 Hit::PowerItem(i) if matches!(self.mode, Mode::Power) => self.pick_power(i),
+                Hit::PwField(i) => {
+                    if let Mode::BmcPassword(form) = &mut self.mode {
+                        form.field = i;
+                    }
+                }
+                Hit::PwUser(d) => self.pw_move_user(d),
                 Hit::Field(i) => {
                     if let Mode::AddHost(form) = &mut self.mode {
                         form.field = i;
@@ -1573,7 +1856,8 @@ impl App {
             Hit::AddHost => self.open_add_host(),
             Hit::HostPassword | Hit::SaveToList => self.open_host_password(),
             Hit::UseHost => self.pick(),
-            Hit::Field(_) => {}
+            Hit::Field(_) | Hit::PwField(_) | Hit::PwUser(_) => {}
+            Hit::ChangeBmcPassword => self.open_bmc_password(),
             // Only drawn while the menu is open, which is handled above.
             Hit::PowerItem(_) => {}
             Hit::Run => self.pick(),
@@ -2284,6 +2568,199 @@ mod tests {
         assert_eq!(highlighted_rows(&mut a), [1]);
     }
 
+    /// Two hosts, connected to the first, nothing loading, on the Hosts screen.
+    fn ready_for_password() -> App {
+        let mut a = two_hosts();
+        a.t.user = Some("admin".into());
+        a.hosts[0] = a.t.clone();
+        a.switch(Screen::Hosts);
+        a.loading.clear();
+        ui::draw(&mut a, 120, 28);
+        a
+    }
+
+    fn pw_form(a: &App) -> &bmcpw::Form {
+        let Mode::BmcPassword(f) = &a.mode else { panic!("no password form: {:?}", a.mode) };
+        f
+    }
+
+    fn users() -> Vec<bmcpw::User> {
+        bmcpw::parse_users("2   admin   false false true ADMINISTRATOR\n3   monitor true true true USER\n")
+    }
+
+    /// Pass the safety check as the main loop would, and deliver the user list.
+    fn to_pick(a: &mut App) {
+        click(a, Hit::ChangeBmcPassword);
+        click(a, Hit::DialogOk); // unlock
+        type_text(a, "current-pw");
+        press(a, KeyCode::Enter);
+        assert!(matches!(a.want_pw.take(), Some(bmcpw::Job::Check(p)) if p == "current-pw"));
+        assert!(a.pw_checked(Ok(true)));
+        let e = a.epoch;
+        a.on_msg(Msg::Users(e, Ok(users())));
+        ui::draw(a, 120, 28);
+        assert_eq!(pw_form(a).step, bmcpw::Step::Pick);
+    }
+
+    #[test]
+    fn password_change_needs_unlock_current_password_and_confirmation() {
+        let mut a = ready_for_password();
+        press(&mut a, KeyCode::Char('c'));
+        assert!(matches!(a.mode, Mode::Unlock { then: Then::BmcPassword, .. }));
+        press(&mut a, KeyCode::Char('y'));
+        assert_eq!(pw_form(&a).step, bmcpw::Step::Current);
+        // A wrong current password goes nowhere, three close the form and lock.
+        for n in 1..=3 {
+            type_text(&mut a, "wrong");
+            press(&mut a, KeyCode::Enter);
+            a.want_pw = None;
+            assert!(!a.pw_checked(Ok(false)));
+            if n < 3 {
+                assert!(pw_form(&a).current.is_empty() && pw_form(&a).step == bmcpw::Step::Current);
+            }
+        }
+        assert!(matches!(a.mode, Mode::Normal) && !a.unlocked && !a.pw_busy);
+
+        press(&mut a, KeyCode::Char('c'));
+        press(&mut a, KeyCode::Char('y'));
+        type_text(&mut a, "current-pw");
+        press(&mut a, KeyCode::Enter);
+        a.want_pw = None;
+        a.pw_checked(Ok(true));
+        let e = a.epoch;
+        a.on_msg(Msg::Users(e, Ok(users())));
+        assert_eq!(pw_form(&a).selected().unwrap().name, "admin", "the login user is preselected");
+        press(&mut a, KeyCode::Tab);
+        type_text(&mut a, "y q");
+        press(&mut a, KeyCode::Tab);
+        type_text(&mut a, "different");
+        press(&mut a, KeyCode::Enter);
+        assert!(pw_form(&a).error.contains("do not match") && a.want_pw.is_none());
+        for _ in 0.."different".len() {
+            press(&mut a, KeyCode::Backspace);
+        }
+        type_text(&mut a, "y q");
+        press(&mut a, KeyCode::Enter);
+        assert!(matches!(a.mode, Mode::ConfirmBmcPassword { .. }) && a.want_pw.is_none());
+        let c = ui::draw(&mut a, 120, 28);
+        let text: String = (0..28).map(|y| c.row(y)).collect();
+        assert!(text.contains("user 2 admin") && text.contains("otherbox") | text.contains("testbox") && !text.contains("y q"), "{text}");
+        press(&mut a, KeyCode::Enter);
+        assert!(a.want_pw.is_none() && !a.pw_busy, "Enter alone must not change a password");
+        press(&mut a, KeyCode::Esc);
+        assert_eq!(pw_form(&a).new, "y q", "cancel goes back to the entries");
+        press(&mut a, KeyCode::Enter);
+        press(&mut a, KeyCode::Char('y'));
+        assert!(matches!(a.want_pw.take(), Some(bmcpw::Job::Change(u, p)) if u.id == 2 && p == "y q"));
+        assert!(a.pw_busy && !a.unlocked);
+    }
+
+    #[test]
+    fn nothing_else_happens_while_a_password_change_runs() {
+        let mut a = ready_for_password();
+        to_pick(&mut a);
+        click(&mut a, Hit::PwField(bmcpw::PICK_NEW));
+        a.paste("pasted new");
+        click(&mut a, Hit::PwField(bmcpw::PICK_AGAIN));
+        a.paste("pasted new\n");
+        click(&mut a, Hit::DialogOk);
+        a.paste("y");
+        assert!(a.want_pw.is_none(), "paste can not confirm");
+        click(&mut a, Hit::DialogOk);
+        assert!(a.pw_busy);
+        for k in ['2', 'r', 'u', 'y', 'c', 'l', 'p', 'S'] {
+            press(&mut a, KeyCode::Char(k));
+        }
+        press(&mut a, KeyCode::Esc);
+        a.switch(Screen::Sensors);
+        a.tick(Instant::now() + Duration::from_secs(3600));
+        assert_eq!(a.current, 0, "no host switch");
+        assert!(!a.unlocked && a.loading.is_empty() && !a.want_sol && !a.want_connect && a.queue.is_empty());
+    }
+
+    #[test]
+    fn choosing_another_user_clears_what_was_typed() {
+        let mut a = ready_for_password();
+        to_pick(&mut a);
+        press(&mut a, KeyCode::Tab);
+        type_text(&mut a, "for-admin");
+        click(&mut a, Hit::PwUser(1));
+        assert!(pw_form(&a).selected().unwrap().name == "monitor" && pw_form(&a).new.is_empty());
+        click(&mut a, Hit::PwUser(1));
+        assert_eq!(pw_form(&a).selected().unwrap().name, "admin", "wraps around");
+        click(&mut a, Hit::DialogCancel);
+        assert!(matches!(a.mode, Mode::Normal) && a.want_pw.is_none());
+    }
+
+    #[test]
+    fn password_change_only_for_the_connected_idle_host() {
+        let mut a = ready_for_password();
+        press(&mut a, KeyCode::Down); // the other host is selected
+        press(&mut a, KeyCode::Char('c'));
+        assert!(matches!(a.mode, Mode::Normal) && a.status.contains("connect to that host"), "{}", a.status);
+        ui::draw(&mut a, 120, 28);
+        assert!(!a.hits.iter().any(|(_, h)| *h == Hit::ChangeBmcPassword));
+        press(&mut a, KeyCode::Up);
+        a.loading.insert(Screen::Dash);
+        press(&mut a, KeyCode::Char('c'));
+        assert!(a.status.contains("still being read"));
+        a.loading.clear();
+        let _rx = with_console(&mut a, b"");
+        a.switch(Screen::Hosts);
+        press(&mut a, KeyCode::Char('c'));
+        assert!(a.status.contains("disconnect the console"), "{}", a.status);
+        let mut b = ready_for_password();
+        b.start_unchosen();
+        press(&mut b, KeyCode::Char('c'));
+        assert!(matches!(b.mode, Mode::Normal));
+    }
+
+    #[test]
+    fn password_results_are_reported_and_only_verified_ones_adopted() {
+        for (changed, verified, adopt) in [(true, true, true), (true, false, false), (false, false, false)] {
+            let mut a = ready_for_password();
+            a.pw_busy = true;
+            let out = bmcpw::Outcome { changed, verified, saved: Some("/tmp/new-file".into()), problem: (!verified).then(|| "why".into()) };
+            a.on_msg(Msg::PasswordChanged(0, users()[0].clone(), out));
+            let Mode::Report(lines) = &a.mode else { panic!() };
+            assert!(!a.pw_busy);
+            assert_eq!(a.want_adopt.is_some(), adopt);
+            assert_eq!(a.states[0].halt_auto, !verified);
+            if !verified {
+                assert!(lines.iter().any(|l| l.contains("/tmp/new-file")) && lines.iter().any(|l| l.contains("Nothing is retried")));
+            }
+            press(&mut a, KeyCode::Char('y'));
+            assert!(matches!(a.mode, Mode::Report(_)));
+            press(&mut a, KeyCode::Esc);
+            assert!(matches!(a.mode, Mode::Normal));
+        }
+    }
+
+    #[test]
+    fn password_form_fits_the_smallest_terminal() {
+        let mut a = ready_for_password();
+        for (w, h) in [(40, 12), (80, 24)] {
+            a.mode = Mode::Normal;
+            ui::draw(&mut a, w, h);
+            assert!(a.hits.iter().any(|(_, k)| *k == Hit::ChangeBmcPassword), "button at {w}x{h}");
+            let mut form = bmcpw::Form::default();
+            for step in [bmcpw::Step::Current, bmcpw::Step::Pick] {
+                form.step = step;
+                form.users = users();
+                form.error = "the two entries do not match".into();
+                a.mode = Mode::BmcPassword(form.clone());
+                let c = ui::draw(&mut a, w, h);
+                let text: String = (0..h).map(|y| c.row(y)).collect();
+                assert!(text.contains("do not match"), "{step:?} {w}x{h}");
+                assert!(a.hits.iter().any(|(_, k)| *k == Hit::DialogOk) && a.hits.iter().any(|(_, k)| *k == Hit::DialogCancel));
+                let fields = if step == bmcpw::Step::Pick { 3 } else { 1 };
+                for i in 0..fields {
+                    assert!(a.hits.iter().any(|(_, k)| *k == Hit::PwField(i)), "field {i} {step:?} {w}x{h}");
+                }
+            }
+        }
+    }
+
     #[test]
     fn paste_fills_a_field_exactly_and_never_submits() {
         let mut a = two_hosts();
@@ -2455,7 +2932,7 @@ mod tests {
         press(&mut a, KeyCode::Down);
         assert!(text(&mut a, 120, 28).contains("[ Connect to two ]"));
         let narrow = text(&mut a, 40, 12);
-        assert!(narrow.contains("[ Connect ]") && narrow.contains("[ Password ]"), "{narrow}");
+        assert!(narrow.contains("[ Connect ]") && narrow.contains("[ Saved pw ]"), "{narrow}");
     }
 
     #[test]

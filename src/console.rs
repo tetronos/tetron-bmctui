@@ -138,32 +138,39 @@ fn write_input(mut to: File, from: Receiver<Vec<u8>>) {
     }
 }
 
+/// Run a program with a new pseudo-terminal as its controlling terminal.
+/// Returns the child and our side of the terminal.
+pub fn spawn_in_pty(bin: &str, args: &[String], s: &Settings) -> io::Result<(Child, File)> {
+    let (master, slave) = open_pty(s)?;
+    let mut cmd = Command::new(bin);
+    cmd.args(args)
+        .env("TERM", "vt100")
+        .stdin(Stdio::from(slave.try_clone()?))
+        .stdout(Stdio::from(slave.try_clone()?))
+        .stderr(Stdio::from(slave));
+    // SAFETY: setsid and ioctl are async-signal-safe. They make the pty the
+    // controlling terminal of the child, which then also gets SIGHUP if we die
+    // without cleaning up.
+    unsafe {
+        cmd.pre_exec(|| {
+            if libc::setsid() < 0 || libc::ioctl(0, libc::TIOCSCTTY, 0) < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let child = cmd.spawn()?;
+    // `cmd` still holds the child side. It must close here, or the end of
+    // output would never be seen.
+    drop(cmd);
+    Ok((child, master))
+}
+
 impl Console {
     /// Start `ipmitool sol activate` for a host. The caller writes the audit
     /// record first.
     pub fn spawn(t: &Target, s: &Settings) -> io::Result<Console> {
-        let (master, slave) = open_pty(s)?;
-        let mut cmd = Command::new(&t.bin);
-        cmd.args(t.cli_args(&["sol".into(), "activate".into()]))
-            .env("TERM", "vt100")
-            .stdin(Stdio::from(slave.try_clone()?))
-            .stdout(Stdio::from(slave.try_clone()?))
-            .stderr(Stdio::from(slave));
-        // SAFETY: setsid and ioctl are async-signal-safe. They make the pty the
-        // controlling terminal of the child, which then also gets SIGHUP if we
-        // die without cleaning up.
-        unsafe {
-            cmd.pre_exec(|| {
-                if libc::setsid() < 0 || libc::ioctl(0, libc::TIOCSCTTY, 0) < 0 {
-                    return Err(io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
-        let child = cmd.spawn()?;
-        // `cmd` still holds the child side. It must close here, or the end of
-        // output would never be seen.
-        drop(cmd);
+        let (child, master) = spawn_in_pty(&t.bin, &t.cli_args(&["sol".into(), "activate".into()]), s)?;
         let (parser, flags) = (new_parser(s), Arc::new(Flags::default()));
         let (input, rx) = sync_channel(INPUT_QUEUE);
         let writer = master.try_clone()?;

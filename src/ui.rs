@@ -7,6 +7,7 @@
 //!   97 to 119             navigation, main; details on request
 //!   below 97              one pane; navigation opens as an overlay
 
+use crate::bmcpw;
 use crate::app::{self, App, FORM_FIELDS, FORM_PASSWORD, Hit, HostForm, Mode, NAV, Pane, Then};
 use crate::canvas::{Canvas, Rect, TermStyle};
 use crate::ipmi::{self, Screen};
@@ -193,6 +194,7 @@ fn draw_nav(app: &mut App, c: &mut Canvas, r: Rect) {
 /// The actions of the host list. Connect comes first, then what can be done
 /// with the list. `end` is the first column the buttons must not reach.
 fn host_buttons(app: &mut App, c: &mut Canvas, x: usize, y: usize, end: usize) {
+    let first_x = x;
     let Some(i) = app.selected_host() else {
         button(app, c, x, y, "[ Add host ]", Hit::AddHost, Kind::Head);
         return;
@@ -201,7 +203,7 @@ fn host_buttons(app: &mut App, c: &mut Canvas, x: usize, y: usize, end: usize) {
     let in_use = i == app.current && app.chosen;
     // The local BMC has neither a password nor anything to save.
     let second = if listed {
-        Some(("[ Password ]", Hit::HostPassword))
+        Some(("[ Saved pw ]", Hit::HostPassword))
     } else {
         app.hosts[i].host.is_some().then_some(("[ Save host ]", Hit::SaveToList))
     };
@@ -220,6 +222,12 @@ fn host_buttons(app: &mut App, c: &mut Canvas, x: usize, y: usize, end: usize) {
     x = button(app, c, x, y, "[ Add host ]", Hit::AddHost, Kind::Head) + 1;
     if let Some((label, hit)) = second {
         button(app, c, x, y, label, hit, Kind::Head);
+    }
+    // On a row of its own, away from the buttons that only change this
+    // computer. It acts on the BMC, so only for the host in use.
+    if in_use {
+        let kind = if app.unlocked { Kind::Warn } else { Kind::Head };
+        button(app, c, first_x, y + 1, "[ Change BMC password ]", Hit::ChangeBmcPassword, kind);
     }
 }
 
@@ -391,9 +399,9 @@ fn draw_main(app: &mut App, c: &mut Canvas, r: Rect) {
         button(app, c, corner, r.y, label, Hit::Live, if app.live { Kind::Sel } else { Kind::Head });
     }
     let mut a = inner(r);
-    // The host list keeps its last row for its buttons.
-    let buttons_row = (app.screen == Screen::Hosts && a.h > 1).then(|| {
-        a.h -= 1;
+    // The host list keeps its last two rows for its buttons.
+    let buttons_row = (app.screen == Screen::Hosts && a.h > 2).then(|| {
+        a.h -= 2;
         a.y + a.h
     });
     app.view_rows = a.h.max(1);
@@ -492,7 +500,10 @@ fn key_hints(app: &mut App, c: &mut Canvas, y: usize) {
         hints.push(("q quit", KeyCode::Char('q')));
         if app.screen == Screen::Hosts {
             hints.push(("a add", KeyCode::Char('a')));
-            hints.push(("w password", KeyCode::Char('w')));
+            hints.push(("w saved pw", KeyCode::Char('w')));
+            if app.chosen {
+                hints.push(("c BMC pw", KeyCode::Char('c')));
+            }
         }
         if app.screen == Screen::Console && !app.console_live() {
             hints.push(("Enter connect", KeyCode::Enter));
@@ -543,7 +554,8 @@ fn help_text(app: &App) -> Vec<String> {
         "r               refresh",
         "l               Live: refresh repeatedly",
         "p               power menu",
-        "a, w            add host, its password",
+        "a, w            add host, its saved pw",
+        "c               change BMC password",
         "S               full screen console",
         "?               this help",
         "q               quit",
@@ -569,6 +581,100 @@ fn help_text(app: &App) -> Vec<String> {
         "Writes are recorded in the audit log.".into(),
     ]);
     v
+}
+
+/// The form that changes a password on the BMC. It fits the smallest terminal.
+fn draw_bmc_password(app: &mut App, c: &mut Canvas, form: &bmcpw::Form) {
+    const LABEL: usize = 10;
+    let w = 60.min(c.w);
+    let h = 10.min(c.h);
+    let r = Rect::new((c.w - w) / 2, (c.h - h) / 2, w, h);
+    app.hits.clear();
+    c.clear(r);
+    c.frame(r);
+    // The host is named, so it is clear which BMC is changed.
+    c.text(r.x + 2, r.y, w - 4, &format!(" BMC password: {} ", app.t.describe()), Kind::Warn);
+    let room = w.saturating_sub(LABEL + 5);
+    let local = app.t.host.is_none();
+    let mut y = r.y + 1;
+    let put = |c: &mut Canvas, y: &mut usize, text: &str, kind: Kind, max_lines: usize| {
+        for line in wrap(text, w - 4).iter().take(max_lines) {
+            if *y < r.y + h - 2 {
+                c.text(r.x + 2, *y, w - 4, line, kind);
+                *y += 1;
+            }
+        }
+    };
+    let field = |app: &mut App, c: &mut Canvas, y: &mut usize, i: usize, label: &str, shown: String| {
+        let kind = if form.field == i { Kind::Sel } else { Kind::Normal };
+        let cursor = if form.field == i { "_" } else { "" };
+        c.text(r.x + 2, *y, LABEL, label, Kind::Dim);
+        c.line(r.x + 2 + LABEL, *y, room, &format!("{shown}{cursor}"), kind);
+        app.hits.push((Rect::new(r.x + 2, *y, w - 4, 1), Hit::PwField(i)));
+        *y += 1;
+    };
+    let stars = |s: &str| "*".repeat(s.len());
+    let (ok, note) = match form.step {
+        bmcpw::Step::Current if local => {
+            put(c, &mut y, "Safety check: type localhost to change a password on this machine's BMC.", Kind::Normal, 3);
+            field(app, c, &mut y, 0, "Confirm", form.current.clone());
+            (Some("[ Next ]"), "")
+        }
+        bmcpw::Step::Current => {
+            put(c, &mut y, "Safety check: type the CURRENT password this program uses.", Kind::Normal, 3);
+            field(app, c, &mut y, 0, "Current", stars(&form.current));
+            (Some("[ Next ]"), "It is compared here, not sent. Pasting works.")
+        }
+        bmcpw::Step::Loading => {
+            put(c, &mut y, "Reading the BMC user list ...", Kind::Normal, 2);
+            (None, "")
+        }
+        bmcpw::Step::Pick => {
+            // The user, with arrows to move between them.
+            let shown = form.selected().map_or(String::new(), |u| {
+                let mark = if bmcpw::is_login(&app.t, u) { " (login)" } else { "" };
+                format!("{} {}{mark} {}", u.id, u.name, u.privilege)
+            });
+            c.text(r.x + 2, y, LABEL, "User", Kind::Dim);
+            let x = button(app, c, r.x + 2 + LABEL, y, "[<]", Hit::PwUser(-1), Kind::Head) + 1;
+            let width = (r.x + w).saturating_sub(x + 6);
+            let kind = if form.field == bmcpw::PICK_USER { Kind::Sel } else { Kind::Normal };
+            c.line(x, y, width, &shown, kind);
+            app.hits.push((Rect::new(x, y, width, 1), Hit::PwField(bmcpw::PICK_USER)));
+            button(app, c, x + width + 1, y, "[>]", Hit::PwUser(1), Kind::Head);
+            y += 1;
+            field(app, c, &mut y, bmcpw::PICK_NEW, "New", stars(&form.new));
+            field(app, c, &mut y, bmcpw::PICK_AGAIN, "Again", stars(&form.again));
+            (Some("[ Change ... ]"), "1 to 20 characters. Pasting works.")
+        }
+    };
+    if form.error.is_empty() {
+        put(c, &mut y, note, Kind::Dim, 3);
+    } else {
+        put(c, &mut y, &form.error, Kind::Bad, 3);
+    }
+    let by = r.y + h - 2;
+    let mut x = r.x + 2;
+    if let Some(label) = ok {
+        x = button(app, c, x, by, label, Hit::DialogOk, Kind::Head) + 3;
+    }
+    button(app, c, x, by, "[ Cancel (Esc) ]", Hit::DialogCancel, Kind::Head);
+}
+
+/// What happened, in full: paths are too long for the status line.
+fn draw_report(app: &mut App, c: &mut Canvas, lines: &[String]) {
+    let w = 72.min(c.w);
+    let body: Vec<String> = lines.iter().flat_map(|l| wrap(l, w - 4)).collect();
+    let h = (body.len() + 4).min(c.h);
+    let r = Rect::new((c.w - w) / 2, (c.h - h) / 2, w, h);
+    app.hits.clear();
+    c.clear(r);
+    c.frame(r);
+    c.text(r.x + 2, r.y, w - 4, " Result ", Kind::Sel);
+    for (i, line) in body.iter().take(h.saturating_sub(4)).enumerate() {
+        c.text(r.x + 2, r.y + 1 + i, w - 4, line, Kind::Normal);
+    }
+    button(app, c, r.x + 2, r.y + h - 2, "[ Close (Esc) ]", Hit::DialogCancel, Kind::Head);
 }
 
 /// The form that adds a host. It fits the smallest terminal.
@@ -676,6 +782,14 @@ fn draw_help(app: &mut App, c: &mut Canvas) {
 /// Draw the open dialog on top of everything. It also replaces all clickable
 /// regions, so nothing behind it can be clicked.
 fn dialog(app: &mut App, c: &mut Canvas) {
+    if let Mode::BmcPassword(form) = &app.mode {
+        let form = form.clone();
+        return draw_bmc_password(app, c, &form);
+    }
+    if let Mode::Report(lines) = &app.mode {
+        let lines = lines.clone();
+        return draw_report(app, c, &lines);
+    }
     if let Mode::AddHost(form) = &app.mode {
         let form = form.clone();
         return draw_form(app, c, &form);
@@ -686,7 +800,21 @@ fn dialog(app: &mut App, c: &mut Canvas) {
         _ => {}
     }
     let (title, text, ok, anchor) = match &app.mode {
-        Mode::Normal | Mode::Help | Mode::Power | Mode::AddHost(_) => return,
+        Mode::Normal | Mode::Help | Mode::Power | Mode::AddHost(_) | Mode::BmcPassword(_) | Mode::Report(_) => return,
+        Mode::ConfirmBmcPassword { form, anchor } => {
+            let (who, login) = form.selected().map_or_else(Default::default, |u| (format!("user {} {}", u.id, u.name), bmcpw::is_login(&app.t, u)));
+            let effect = if login {
+                "This is your login. The new one is first saved, unencrypted, in a file."
+            } else {
+                "How this program logs in does not change."
+            };
+            (
+                "Change BMC password",
+                vec![format!("On {}:", app.t.describe()), format!("change the password of {who}?"), effect.to_string()],
+                "[ Change (y) ]",
+                *anchor,
+            )
+        }
         Mode::SavePassword { form, anchor } => (
             "Save password",
             vec![

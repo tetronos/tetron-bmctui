@@ -74,7 +74,7 @@ Paste into a field with the paste keys of your terminal, often `Ctrl`, `Shift`, 
 
 **Picking a server:** click its tab in the top bar or press its number. On the **Hosts** screen, click or move to a server to select it. To connect, press `Enter`, click its row again, or click `[ Connect ]`. Selecting alone does not contact it.
 
-**Changing a saved password:** select the server on the Hosts screen and press `w` or click `[ Password ]`. Give another password file or type the new password. This changes only what is saved on your computer. **It does not change the password on the BMC.** If the old password was in a file that this program wrote and no other server uses it, that file is deleted. Your own files are never deleted. Nothing logs in with the new password until you ask, for example with `r`.
+**Changing a saved password:** select the server on the Hosts screen and press `w` or click `[ Saved pw ]`. Give another password file or type the new password. This changes only what is saved on your computer. **It does not change the password on the BMC.** If the old password was in a file that this program wrote and no other server uses it, that file is deleted. Your own files are never deleted. Nothing logs in with the new password until you ask, for example with `r`.
 
 **Adding a server:** on the Hosts screen, press `a` or click `[ Add host ]`. Move between fields with `Tab` or by clicking. `Enter` goes to the next field and saves from the last one. Give either the path of a password file or the password itself.
 
@@ -101,6 +101,27 @@ The list and every password file must have mode 0600 (`chmod 600`). The list its
 
 The default list is loaded at start. With `-H` or `BMC_HOST`, that host comes first and is the one in use. `--hosts FILE` names another list and `--select NAME` chooses the first server. The top bar shows the IP and MAC address of the selected server's BMC when the terminal is wide enough; the Hosts screen shows them in its details too. Only the selected server is contacted, and each tab shows when its state was last checked.
 
+## Changing a password on the BMC
+
+`[ Saved pw ]` changes only what is saved on your computer. **`[ Change BMC password ]` changes the password on the BMC itself.**
+
+1. Connect to the server, open the **Hosts** screen and press `c` or click `[ Change BMC password ]`. Disconnect the console first. Unlock when asked.
+2. **Safety check:** type the current password that the program uses. It is compared on your computer and not sent. For `localhost`, type `localhost` instead. Three wrong entries close the form and lock writes.
+3. Choose the user with `[<]`, `[>]` or the arrow keys. Your own login is marked and selected first. Type the new password twice. You can paste it.
+4. Confirm with `y` or `[ Change (y) ]`. `Enter` alone does not confirm.
+
+A new password has 1 to 20 plain ASCII characters. As with `ipmitool`, there is no minimum length, but a short password is easy to guess. The BMC may have rules of its own. The password is never put on a command line: the program answers the password prompt of `ipmitool`. Only passwords change, not user names or permissions.
+
+When you change **your own login**:
+
+- The new password is first saved, **unencrypted**, in a new file with mode 0600 in `~/.config/tetron-bmctui/pass/`, so it is not lost if the connection drops.
+- After the BMC confirms the change, the program logs in once with the new password. If that works, a saved server uses the new file from then on. An old password file that the program had written is deleted if no other server uses it.
+- For a server given with `-H`, only the running program uses the new file. **Your own password file still holds the old password.** Update it before the next start.
+- If the change is not confirmed or the login fails, nothing is retried, because repeated wrong passwords can lock a BMC account. The result window shows where the new password is saved. Check which password works before you try again.
+- Other saved servers that hold a copy of the old password are not changed.
+
+While a change runs, the program does nothing else with the BMC. If you quit, it waits for the change to finish. This feature is tested with a simulated BMC. On real hardware only the password prompt has been checked, not a change.
+
 ## Keys and mouse
 
 You can click screens, host tabs, rows, buttons and key hints. The mouse wheel scrolls the pane under the pointer. In most terminals, hold Shift while dragging to select text.
@@ -117,6 +138,7 @@ You can click screens, host tabs, rows, buttons and key hints. The mouse wheel s
 | `e` | export the screen |
 | `a` | add a server (Hosts screen) |
 | `w` | change a saved password, or save a `-H` server (Hosts screen) |
+| `c` | change a password on the BMC (Hosts screen) |
 | `d` | show or hide details |
 | `r` | refresh |
 | `l` | Live on or off (Overview and Sensors) |

@@ -157,7 +157,7 @@ pub fn validate(n: &NewHost) -> Result<(), String> {
 
 /// Create a new private file for a password below `dir` (mode 0700). A file
 /// that exists is never written to.
-fn new_password_file(dir: &Path, host: &str, password: &str) -> Result<PathBuf, String> {
+pub fn new_password_file(dir: &Path, host: &str, password: &str) -> Result<PathBuf, String> {
     let fail = |e: std::io::Error| format!("password file in {}: {e}", dir.display());
     std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir).map_err(fail)?;
     // The host name must not be able to leave the directory or hide the file.

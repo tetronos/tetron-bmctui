@@ -19,6 +19,26 @@ case "$args" in
   echo "Power Overload       : false"
   echo "Main Power Fault     : false"
   ;;
+*"user list"*)
+  printf 'ID  Name\t     Callin  Link Auth\tIPMI Msg   Channel Priv Limit\n'
+  echo "1                    true    false      false      Unknown (0x00)"
+  echo "2   admin            false   false      true       ADMINISTRATOR"
+  echo "3   monitor          true    true       true       USER"
+  ;;
+*"user set password"*)
+  for id; do :; done
+  for n in 1 2; do
+    stty -echo </dev/tty
+    printf 'Password for user %s: ' "$id" >/dev/tty
+    IFS= read -r typed </dev/tty
+    eval "p$n=\$typed"
+    stty echo </dev/tty
+  done
+  [ "$p1" = "$p2" ] || { echo "Passwords do not match"; exit 1; }
+  [ "$p1" = reject ] && { echo "Set User Password command failed (user $id)"; exit 1; }
+  [ -n "$FAKE_BMC_PASSWORD_FILE" ] && printf '%s\n' "$p1" > "$FAKE_BMC_PASSWORD_FILE"
+  echo "Set User Password command successful (user $id)"
+  ;;
 *"lan print"*)
   echo "IP Address Source       : DHCP Address"
   echo "IP Address              : 192.0.2.10"
