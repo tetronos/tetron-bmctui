@@ -78,7 +78,7 @@
 <div class="grid">
 <div class="card"><h3>Console in a pane</h3><p>Serial over LAN with BIOS colors, scrollback and zoom.</p></div>
 <div class="card"><h3>Power while you watch</h3><p>Open the power menu over the console and see the server restart.</p></div>
-<div class="card"><h3>Many servers</h3><p>Add hosts in the program or in a plain list. Switch with a number key or a click.</p></div>
+<div class="card"><h3>Many servers</h3><p>Pick a server at start. Add hosts and their saved passwords in the program, or change a user's password on the BMC.</p></div>
 <div class="card"><h3>Status at a glance</h3><p>Overview, sensors, event log and inventory, with filter and export.</p></div>
 <div class="card"><h3>Mouse or keyboard</h3><p>Click anything, or never touch the mouse. Works over SSH.</p></div>
 <div class="card"><h3>Careful by default</h3><p>Starts read-only, asks before dangerous actions and keeps an audit log.</p></div>
@@ -87,16 +87,16 @@
 <section><div class="wrap shot-block">
 <h2>The console stays at the center</h2>
 <p>Open serial over LAN in a pane and keep your server list and screens beside it. Zoom when you want the whole terminal.</p>
-<figure><pre role="img" aria-label="Serial console in a pane, with the host tabs above it">[1 web01 ok 18:25] [2 db01 unknown] [3 build01 unknown]               192.0.2.11 02:00:5e:10:00:11  Supermicro [ Power ]
+<figure><pre role="img" aria-label="Serial console in a pane, with the host tabs above it">[1 web01 ok 21:44] [2 db01 unknown] [3 build01 unknown] [4 localhost unknown]     192.0.2.11 02:00:5e:10:00:11 [ Power ]
 +- Screens ----+- Console: typing to host ------------------------------------------------------+- Details ------------+
-|&gt; Console     |[SOL Session operational.  Use ~? for help]                                     | state                |
+|  Hosts       |[SOL Session operational.  Use ~? for help]                                     | state                |
 |  Overview    |                                                                                | typing to host       |
-|  Sensors     |Debian GNU/Linux 13 web01 ttyS1                                                 | size                 |
-|  Events      |                                                                                | 80x24                |
-|  Inventory   |web01 login: admin                                                              | command key          |
-|  Power       |Password:                                                                       | Ctrl-]               |
-|  Fans        |admin@web01:~$ uptime                                                           |                      |
-|  Hosts       | 14:02:11 up 12 days,  3:41,  1 user,  load average: 0.21, 0.18, 0.15           | Keys go to the host  |
+|  Inventory   |Debian GNU/Linux 13 web01 ttyS1                                                 | size                 |
+|  Sensors     |                                                                                | 80x24                |
+|  Fans        |web01 login: admin                                                              | command key          |
+|  Events      |Password:                                                                       | Ctrl-]               |
+|&gt; Console     |admin@web01:~$ uptime                                                           |                      |
+|  Power       | 14:02:11 up 12 days,  3:41,  1 user,  load average: 0.21, 0.18, 0.15           | Keys go to the host  |
 |              |admin@web01:~$                                                                  | while the console    |
 |              |                                                                                | pane has the focus.  |
 |              |                                                                                |                      |
@@ -111,16 +111,16 @@
 <section><div class="wrap shot-block">
 <h2>Power cycle without looking away</h2>
 <p>The power menu opens on top of the console, which stays connected behind it. The menu names the server, so you know which one you are about to restart.</p>
-<figure><pre role="img" aria-label="Power menu open over a connected console">[1 web01 ok 18:25] [2 db01 unknown] [3 build01 unknown]               192.0.2.11 02:00:5e:10:00:11  Supermicro [ Power ]
+<figure><pre role="img" aria-label="Power menu open over a connected console">[1 web01 ok 21:44] [2 db01 unknown] [3 build01 unknown] [4 localhost unknown]     192.0.2.11 02:00:5e:10:00:11 [ Power ]
 +- Screens ----+- Console: connected -----------------------------------------------------------+- Details ------------+
-|&gt; Console     |[SOL Session operational.  Use ~? for help]                                     | state                |
+|  Hosts       |[SOL Session operational.  Use ~? for help]                                     | state                |
 |  Overview    |                                                                                | connected            |
-|  Sensors     |Debian GNU/Linux 13 web01 ttyS1                                                 | size                 |
-|  Events      |                                                                                | 80x24                |
-|  Inventory   |web01 login: admin                                                              | command key          |
-|  Power       |Password:                                                                       | Ctrl-]               |
-|  Fans        |admin@web01:~$ uptime                                                           |                      |
-|  Hosts       | 14:02:11 up 12 days,+- Power: web01 (192.0.2.11) ----------------+15           | Keys go to the host  |
+|  Inventory   |Debian GNU/Linux 13 web01 ttyS1                                                 | size                 |
+|  Sensors     |                                                                                | 80x24                |
+|  Fans        |web01 login: admin                                                              | command key          |
+|  Events      |Password:                                                                       | Ctrl-]               |
+|&gt; Console     |admin@web01:~$ uptime                                                           |                      |
+|  Power       | 14:02:11 up 12 days,+- Power: web01 (192.0.2.11) ----------------+15           | Keys go to the host  |
 |              |admin@web01:~$       | Chassis power: on                          |             | while the console    |
 |              |                     |                                            |             | pane has the focus.  |
 |              |                     |  ! Power on                                |             |                      |
@@ -150,16 +150,16 @@
 <section><div class="wrap shot-block">
 <h2>Check the hardware</h2>
 <p>Read sensors, events and inventory. Screens refresh when you ask, so a busy BMC is left alone; turn on Live to watch readings. Type / to filter and press e to save the screen to a file.</p>
-<figure><pre role="img" aria-label="Sensor screen">[1 web01 ok 18:25] [2 db01 unknown] [3 build01 unknown]               192.0.2.11 02:00:5e:10:00:11  Supermicro [ Power ]
-+- Screens ----+- Sensors  updated 18:25:22 --------------------------------------[ Live: off ]-+- Details ------------+
-|  Console     | SENSOR                       STATUS  READING                                   |                      |
+<figure><pre role="img" aria-label="Sensor screen">[1 web01 ok 21:44] [2 db01 unknown] [3 build01 unknown] [4 localhost unknown]     192.0.2.11 02:00:5e:10:00:11 [ Power ]
++- Screens ----+- Sensors  updated 21:44:32 --------------------------------------[ Live: off ]-+- Details ------------+
+|  Hosts       | SENSOR                       STATUS  READING                                   |                      |
 |  Overview    | CPU Temp                     ok      46 degrees C                              |                      |
-|&gt; Sensors     | System Temp                  ok      31 degrees C                              |                      |
-|  Events      | Peripheral Temp              ok      38 degrees C                              |                      |
-|  Inventory   | VRMCpu Temp                  ok      44 degrees C                              |                      |
-|  Power       | DIMMA1 Temp                  ok      36 degrees C                              |                      |
-|  Fans        | DIMMB1 Temp                  ok      37 degrees C                              |                      |
-|  Hosts       | FAN1                         ok      4200 RPM                                  |                      |
+|  Inventory   | System Temp                  ok      31 degrees C                              |                      |
+|&gt; Sensors     | Peripheral Temp              ok      38 degrees C                              |                      |
+|  Fans        | VRMCpu Temp                  ok      44 degrees C                              |                      |
+|  Events      | DIMMA1 Temp                  ok      36 degrees C                              |                      |
+|  Console     | DIMMB1 Temp                  ok      37 degrees C                              |                      |
+|  Power       | FAN1                         ok      4200 RPM                                  |                      |
 |              | FAN2                         ok      4100 RPM                                  |                      |
 |              | FAN3                         ns      No Reading                                |                      |
 |              | FANA                         ok      3900 RPM                                  |                      |
@@ -170,7 +170,7 @@
 |              |                                                                                |                      |
 |              |                                                                                |                      |
 +--------------+--------------------------------------------------------------------------------+----------------------+
- read-only | web01 | u unlocks writes
+ read-only | web01 | host web01 (192.0.2.11): read-only
  ? help  q quit  u unlock  / filter  Tab pane  r refresh  l live  d details  e export</pre><figcaption>Sensor screen. Sample data.</figcaption></figure>
 </div></section>
 <section id="install"><div class="wrap">
