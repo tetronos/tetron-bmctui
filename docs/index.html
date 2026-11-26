@@ -3,52 +3,88 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" type="image/svg+xml" href="images/icon.svg">
+<link rel="icon" type="image/png" href="images/icon.png">
+<link rel="apple-touch-icon" href="images/icon.png">
+<script>try{var t=localStorage.getItem("theme");if(t==="light"||t==="dark")document.documentElement.setAttribute("data-theme",t)}catch(e){}</script>
 <title>tetron-bmctui: your server's BMC in the terminal</title>
 <meta name="description" content="A terminal UI for server BMCs: serial console, power control, sensors and event log over IPMI. Open source, for Linux.">
 <style>
-:root { --bg:#f6f7f9; --card:#fff; --text:#16191d; --soft:#56606c; --line:#dde1e6; --accent:#0b6bcb; }
-@media (prefers-color-scheme: dark) { :root { --bg:#0e1116; --card:#171b22; --text:#e8ebef; --soft:#9aa4b1; --line:#2a313b; --accent:#58a6ff; } }
-* { box-sizing:border-box; }
-body { margin:0; background:var(--bg); color:var(--text); font:17px/1.6 system-ui, sans-serif; }
-main, header, footer { max-width:1080px; margin:0 auto; padding:0 20px; }
-header { text-align:center; padding-top:64px; padding-bottom:24px; }
-h1 { font:700 clamp(2rem,6vw,3.2rem)/1.15 ui-monospace, monospace; margin:0 0 12px; }
-h2 { margin:56px 0 8px; line-height:1.25; }
-h3 { margin:0 0 4px; font-size:1.05rem; }
-p { color:var(--soft); margin:0 0 16px; }
-a { color:var(--accent); }
-.lead { font-size:1.25rem; max-width:680px; margin:0 auto 28px; }
-.button { display:inline-block; margin:6px; padding:12px 22px; border:1px solid var(--accent); border-radius:8px; text-decoration:none; font-weight:600; }
-.button.main { background:var(--accent); color:var(--bg); }
-ul.cards { list-style:none; padding:0; display:grid; gap:14px; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); }
-.cards li { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:18px; }
-.cards p { margin:0; }
-figure { margin:0; }
-pre { background:#0b0e13; color:#d5dbe3; border:1px solid var(--line); border-radius:10px; padding:16px; overflow-x:auto; line-height:1.25; font-family:ui-monospace, "DejaVu Sans Mono", monospace; }
-figure pre { font-size:clamp(7px,1.15vw,12.5px); }
-figcaption { color:var(--soft); font-size:.9rem; margin-top:6px; }
-.note { border-left:4px solid var(--accent); background:var(--card); padding:14px 18px; border-radius:6px; }
-.note p { margin:0; }
-footer { margin-top:56px; padding-bottom:40px; border-top:1px solid var(--line); padding-top:20px; color:var(--soft); }
+  :root { --bg:#0e1116; --surface:#161b22; --fg:#e6eaf0; --muted:#98a3b1; --border:#2a323d; --accent:#7ee0b0; --accent-2:#8fb8dc;
+    --mono:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace; --sans:system-ui,-apple-system,"Segoe UI",sans-serif; color-scheme:dark; }
+  @media (prefers-color-scheme: light) { :root:not([data-theme="dark"]) { --bg:#f6f8fa; --surface:#ffffff; --fg:#1b222c; --muted:#556170; --border:#d5dce5;
+    --accent:#14744c; --accent-2:#2a5f8f; color-scheme:light; } }
+  :root[data-theme="light"] { --bg:#f6f8fa; --surface:#ffffff; --fg:#1b222c; --muted:#556170; --border:#d5dce5; --accent:#14744c; --accent-2:#2a5f8f; color-scheme:light; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:16px/1.65 var(--sans); -webkit-font-smoothing:antialiased; }
+  a { color:var(--accent-2); }
+  :focus-visible { outline:2px solid var(--accent-2); outline-offset:2px; }
+  .wrap { max-width:62rem; margin:0 auto; padding:0 16px; }
+  nav { border-bottom:1px solid var(--border); }
+  nav .wrap { display:flex; gap:16px; align-items:center; height:48px; font:.85rem var(--mono); }
+  nav .brand { display:flex; align-items:center; gap:8px; color:var(--accent); font-weight:700; margin-right:auto; text-decoration:none; }
+  nav .brand img { width:20px; height:20px; }
+  nav a { color:var(--muted); text-decoration:none; } nav a:hover { color:var(--fg); }
+  .tbtn { background:none; color:var(--muted); border:1px solid var(--border); border-radius:6px; padding:3px 10px; font:.75rem var(--mono); cursor:pointer; }
+  header { padding:3.5rem 0 2rem; }
+  h1 { font-size:clamp(2rem,7vw,3.4rem); line-height:1.05; letter-spacing:-.03em; margin:0 0 1rem; }
+  h1 em { font-style:normal; color:var(--accent); }
+  h2 { font-size:1.4rem; margin:0 0 .8rem; }
+  .lede { font-size:1.15rem; color:var(--muted); max-width:42rem; margin:0; }
+  section { padding:2.5rem 0; border-top:1px solid var(--border); }
+  pre { background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:12px 14px; overflow-x:auto; font:.85rem/1.5 var(--mono); margin:.4rem 0 1.2rem; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(17rem,1fr)); gap:12px; }
+  .card { background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:14px 16px; }
+  .card h3 { margin:0 0 .3rem; font:600 1rem var(--mono); }
+  .card p { margin:0 0 .5rem; color:var(--muted); font-size:.93rem; }
+  .card .links { font:.8rem var(--mono); display:flex; gap:12px; }
+  .btn { display:inline-block; margin:1.4rem 8px 0 0; padding:10px 18px; border-radius:8px; background:var(--accent); color:var(--bg); font-weight:600; text-decoration:none; }
+  .btn.ghost { background:none; color:var(--fg); border:1px solid var(--border); }
+  .beta { display:inline-block; font:.72rem var(--mono); letter-spacing:.12em; text-transform:uppercase; color:var(--accent); border:1px solid var(--accent); border-radius:99px; padding:2px 10px; margin:3rem 0 1rem; }
+  .shot { margin:2rem 0 0; border:1px solid var(--border); border-radius:12px; overflow:hidden; }
+  .shot img { display:block; width:100%; height:auto; }
+  .sub { color:var(--muted); font-size:.88rem; margin:.8rem 0 0; }
+  .flavors { display:grid; grid-template-columns:repeat(auto-fit,minmax(18rem,1fr)); gap:12px; margin-top:1.4rem; }
+  .flavors .card .btn { margin-top:.6rem; }
+  .flavors .card .sub { margin-top:.6rem; }
+  footer { padding:2rem 0 3rem; border-top:1px solid var(--border); color:var(--muted); font-size:.85rem; }
+  header.wrap { padding-bottom:2.5rem; }
+  header .lede { margin-bottom:.4rem; }
+  .shot-block figure { margin:0; }
+  figure pre { background:#0b0e13; color:#d5dbe3; line-height:1.25; font-size:clamp(7px,1.15vw,11.5px); margin:.4rem 0 0; }
+  figcaption, .shot-block > p { color:var(--muted); }
+  figcaption { font-size:.88rem; margin-top:6px; }
+  code { font-family:var(--mono); }
 </style>
 </head>
 <body>
-<header>
-<h1>tetron-bmctui</h1>
-<p class="lead">Your server's BMC in the terminal. Serial console, power control, sensors and event log in one window, from your desk or over SSH.</p>
-<a class="button main" href="https://github.com/tetronos/tetron-bmctui/releases">Download</a>
-<a class="button" href="https://github.com/tetronos/tetron-bmctui">Source and docs</a>
+<nav><div class="wrap">
+  <a class="brand" href="https://tetronos.github.io/"><img src="images/icon.svg" alt="">tetronos</a>
+  <a href="#features">Features</a>
+  <a href="#install">Install</a>
+  <a href="https://tetronos.github.io/#projects">Projects</a>
+  <a href="https://github.com/tetronos/tetron-bmctui">GitHub</a>
+  <button class="tbtn" id="theme" type="button" aria-label="Toggle light and dark theme">theme</button>
+</div></nav>
+<header class="wrap">
+  <span class="beta">Early development</span>
+  <h1>Your server's BMC, in the <em>terminal</em>.</h1>
+  <p class="lede">tetron-bmctui puts the serial console, power control, sensors and event log in one window, by mouse or keyboard, from your desk or over SSH. Part of the tetron suite; works without tetron.</p>
+  <a class="btn" href="#install">Install</a><a class="btn ghost" href="https://github.com/tetronos/tetron-bmctui">tetron-bmctui on GitHub</a>
 </header>
 <main>
-<ul class="cards">
-<li><h3>Console in a pane</h3><p>Serial over LAN with BIOS colors, scrollback and zoom.</p></li>
-<li><h3>Power while you watch</h3><p>Open the power menu over the console and see the server restart.</p></li>
-<li><h3>Many servers</h3><p>Add hosts in the program or in a plain list. Switch with a number key or a click.</p></li>
-<li><h3>Status at a glance</h3><p>Overview, sensors, event log and inventory, with filter and export.</p></li>
-<li><h3>Mouse or keyboard</h3><p>Click anything, or never touch the mouse. Works over SSH.</p></li>
-<li><h3>Careful by default</h3><p>Starts read-only, asks before dangerous actions and keeps an audit log.</p></li>
-</ul>
-<section>
+<section id="features"><div class="wrap">
+<h2>Features</h2>
+<div class="grid">
+<div class="card"><h3>Console in a pane</h3><p>Serial over LAN with BIOS colors, scrollback and zoom.</p></div>
+<div class="card"><h3>Power while you watch</h3><p>Open the power menu over the console and see the server restart.</p></div>
+<div class="card"><h3>Many servers</h3><p>Add hosts in the program or in a plain list. Switch with a number key or a click.</p></div>
+<div class="card"><h3>Status at a glance</h3><p>Overview, sensors, event log and inventory, with filter and export.</p></div>
+<div class="card"><h3>Mouse or keyboard</h3><p>Click anything, or never touch the mouse. Works over SSH.</p></div>
+<div class="card"><h3>Careful by default</h3><p>Starts read-only, asks before dangerous actions and keeps an audit log.</p></div>
+</div>
+</div></section>
+<section><div class="wrap shot-block">
 <h2>The console stays at the center</h2>
 <p>Open serial over LAN in a pane and keep your server list and screens beside it. Zoom when you want the whole terminal.</p>
 <figure><pre role="img" aria-label="Serial console in a pane, with the host tabs above it">[1 web01 ok 18:25] [2 db01 unknown] [3 build01 unknown]               192.0.2.11 02:00:5e:10:00:11  Supermicro [ Power ]
@@ -71,8 +107,8 @@ footer { margin-top:56px; padding-bottom:40px; border-top:1px solid var(--line);
 +--------------+--------------------------------------------------------------------------------+----------------------+
  WRITES UNLOCKED  CONSOLE OPEN | web01 | connected. Only new output shows: if blank, press an arrow key. Ctrl-] then ? f
  Ctrl-] then:  . disconnect  z zoom  [ scroll  p power  ? help  Tab pane</pre><figcaption>Serial console in a pane, with the host tabs above it. Sample data.</figcaption></figure>
-</section>
-<section>
+</div></section>
+<section><div class="wrap shot-block">
 <h2>Power cycle without looking away</h2>
 <p>The power menu opens on top of the console, which stays connected behind it. The menu names the server, so you know which one you are about to restart.</p>
 <figure><pre role="img" aria-label="Power menu open over a connected console">[1 web01 ok 18:25] [2 db01 unknown] [3 build01 unknown]               192.0.2.11 02:00:5e:10:00:11  Supermicro [ Power ]
@@ -110,8 +146,8 @@ footer { margin-top:56px; padding-bottom:40px; border-top:1px solid var(--line);
 +--------------+--------------------------------------------------------------------------------+----------------------+
  WRITES UNLOCKED  CONSOLE OPEN | web01 | connected. Only new output shows: if blank, press an arrow key. Ctrl-] then ? f
  ? help  q quit  u lock  Tab pane  r refresh  d details</pre><figcaption>Power menu open over a connected console. Sample data.</figcaption></figure>
-</section>
-<section>
+</div></section>
+<section><div class="wrap shot-block">
 <h2>Check the hardware</h2>
 <p>Read sensors, events and inventory. Screens refresh when you ask, so a busy BMC is left alone; turn on Live to watch readings. Type / to filter and press e to save the screen to a file.</p>
 <figure><pre role="img" aria-label="Sensor screen">[1 web01 ok 18:25] [2 db01 unknown] [3 build01 unknown]               192.0.2.11 02:00:5e:10:00:11  Supermicro [ Power ]
@@ -136,9 +172,9 @@ footer { margin-top:56px; padding-bottom:40px; border-top:1px solid var(--line);
 +--------------+--------------------------------------------------------------------------------+----------------------+
  read-only | web01 | u unlocks writes
  ? help  q quit  u unlock  / filter  Tab pane  r refresh  l live  d details  e export</pre><figcaption>Sensor screen. Sample data.</figcaption></figure>
-</section>
-<section>
-<h2>Get started</h2>
+</div></section>
+<section id="install"><div class="wrap">
+<h2>Install</h2>
 <p>On Debian and Ubuntu, install from the tetronos apt repository. <code>ipmitool</code> comes with it:</p>
 <pre>sudo curl -fsSLo /usr/share/keyrings/tetronos-archive-keyring.gpg https://tetronos.github.io/apt/tetronos-archive-keyring.gpg
 sudo curl -fsSLo /etc/apt/sources.list.d/tetronos.sources https://tetronos.github.io/apt/tetronos.sources
@@ -149,13 +185,19 @@ cd tetron-bmctui
 cargo build --release
 target/release/tetron-bmctui -H 192.0.2.10 -U ADMIN --pass-file ~/.bmc-pass</pre>
 <p>The password file must have mode 0600. Binaries for x86_64 and aarch64 Linux are on the <a href="https://github.com/tetronos/tetron-bmctui/releases">releases page</a>. See the <a href="https://github.com/tetronos/tetron-bmctui#readme">README</a> for the host list, keys and options.</p>
-</section>
-<section class="note">
-<p><strong>Early development.</strong> Written for Supermicro BMCs first and tested on hardware with one Supermicro H12 board. Not every action has been verified. It uses IPMI only, without Redfish or virtual media. Keep BMCs on a private network.</p>
-</section>
+</div></section>
+<section><div class="wrap"><div class="card"><h3>Early development</h3><p>Written for Supermicro BMCs first and tested on hardware with one Supermicro H12 board. Not every action has been verified. It uses IPMI only, without Redfish or virtual media. Keep BMCs on a private network.</p></div></div></section>
 </main>
-<footer>
-<p>Open source under the <a href="https://github.com/tetronos/tetron-bmctui/blob/main/LICENSE">MPL-2.0</a> license. Part of the tetron suite; works without tetron. <a href="https://github.com/tetronos/tetron-bmctui/issues">Report a problem</a>.</p>
-</footer>
+<footer><div class="wrap">Open source under the <a href="https://github.com/tetronos/tetron-bmctui/blob/main/LICENSE">MPL-2.0</a> license. <a href="https://github.com/tetronos/tetron-bmctui/issues">Report a problem</a>. Back to <a href="https://tetronos.github.io/">tetronos</a>.</div></footer>
+<script>
+document.getElementById("theme").addEventListener("click", function () {
+  var r = document.documentElement, cur = r.getAttribute("data-theme");
+  if (!cur) cur = matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+  var next = cur === "light" ? "dark" : "light";
+  r.setAttribute("data-theme", next);
+  try { localStorage.setItem("theme", next); } catch (e) {}
+});
+</script>
+
 </body>
 </html>
