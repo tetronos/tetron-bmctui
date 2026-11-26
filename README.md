@@ -25,7 +25,16 @@ It uses `ipmitool` and is written for Supermicro BMCs first. It is part of the t
 
 ## Install
 
-Download a binary from the [releases page](https://github.com/tetronos/tetron-bmctui/releases). It is for x86_64 Linux with glibc 2.39 or newer, for example Ubuntu 24.04.
+On Debian and Ubuntu (amd64 and arm64), use the [tetronos apt repository](https://tetronos.github.io/apt/). `apt` installs `ipmitool` too, and `apt upgrade` keeps the program current:
+
+    sudo curl -fsSLo /usr/share/keyrings/tetronos-archive-keyring.gpg https://tetronos.github.io/apt/tetronos-archive-keyring.gpg
+    sudo curl -fsSLo /etc/apt/sources.list.d/tetronos.sources https://tetronos.github.io/apt/tetronos.sources
+    sudo apt update
+    sudo apt install tetron-bmctui
+
+It is also in the TetronOS category of [tetron-appstore](https://github.com/tetronos/tetron-appstore).
+
+On other Linux systems, download a binary for x86_64 or aarch64 from the [releases page](https://github.com/tetronos/tetron-bmctui/releases) and install `ipmitool` yourself.
 
 Or build from source:
 

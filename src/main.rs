@@ -61,6 +61,7 @@ Options:
   --dump SCREEN       print dash, sensors, sel, fru, control, fan or hosts
                       as text and exit
   -h, --help          show this help
+  -V, --version       show the version
 
 Keys (? lists them in the program):
   Tab, Shift-Tab      next or previous pane
@@ -148,6 +149,10 @@ fn parse_args() -> Result<Opts, String> {
         match a.as_str() {
             "-h" | "--help" => {
                 println!("{USAGE}");
+                std::process::exit(0);
+            }
+            "-V" | "--version" => {
+                println!("tetron-bmctui {}", env!("CARGO_PKG_VERSION"));
                 std::process::exit(0);
             }
             "-H" => {

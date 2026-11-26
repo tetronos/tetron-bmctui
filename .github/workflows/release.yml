@@ -1,0 +1,77 @@
+name: Release
+
+# Pushing a tag like v0.1.2 builds Linux binaries and .deb packages and
+# attaches them to the GitHub release. The tetronos apt repository picks the
+# .debs up from there. Same shape as the other tetron suite components.
+on:
+  push:
+    tags: ["v*"]
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+jobs:
+  create-release:
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag must match the version in Cargo.toml
+        run: |
+          v=$(grep '^version = ' Cargo.toml | head -1 | cut -d'"' -f2)
+          [ "v$v" = "$GITHUB_REF_NAME" ] || { echo "tag $GITHUB_REF_NAME, Cargo.toml $v"; exit 1; }
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: tetron-bmctui ${{ github.ref_name }}
+          generate_release_notes: true
+
+  build:
+    needs: create-release
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # An old runner on purpose: the binary then needs only an old glibc.
+          - runner: ubuntu-22.04
+            name: tetron-bmctui-linux-x86_64
+            deb_arch: amd64
+          - runner: ubuntu-22.04-arm
+            name: tetron-bmctui-linux-aarch64
+            deb_arch: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test
+        run: cargo test --locked
+      - name: Build binary
+        run: cargo build --release --locked
+      - name: Package binary
+        run: |
+          cp target/release/tetron-bmctui ${{ matrix.name }}
+          sha256sum ${{ matrix.name }} > ${{ matrix.name }}.sha256
+      - name: Build .deb
+        id: deb
+        uses: tetronos/tetron-packaging@459a94fde059eee6ae5fece01b21d8199f4cfcc3
+        with:
+          binary: ${{ matrix.name }}
+          deb-toml: packaging/deb.toml
+          version: ${{ github.ref_name }}
+          arch: ${{ matrix.deb_arch }}
+          maintainer: ${{ vars.DEB_MAINTAINER }}
+          smoke: tetron-bmctui --version
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: |
+            ${{ matrix.name }}
+            ${{ matrix.name }}.sha256
+            ${{ steps.deb.outputs.deb }}
+            ${{ steps.deb.outputs.sha256 }}

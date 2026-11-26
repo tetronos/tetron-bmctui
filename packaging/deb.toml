@@ -1,0 +1,20 @@
+# Package description for mkdeb (https://github.com/tetronos/tetron-packaging).
+# Built in release CI by the build-deb action. mkdeb computes the libc6 floor
+# from the binary.
+name = "tetron-bmctui"
+description = "Terminal UI for server BMCs over IPMI"
+long_description = """
+Serial over LAN console in a pane, power control, sensors, event log and
+hardware inventory for server BMCs, with mouse and keyboard. Written for
+Supermicro BMCs first. Early development."""
+section = "admin"
+license = "MPL-2.0"
+homepage = "https://github.com/tetronos/tetron-bmctui"
+# The program runs ipmitool for everything it does with a BMC.
+depends = ["ipmitool"]
+smoke = "tetron-bmctui --version"
+
+[[files]]
+src = "binary"
+dst = "usr/bin/tetron-bmctui"
+mode = "0755"

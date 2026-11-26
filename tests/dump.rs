@@ -114,3 +114,10 @@ fn host_list() {
     assert_eq!(dump("hosts", &["--hosts", &list], None).status.code(), Some(2));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn version_flag() {
+    let o = Command::new(bin()).arg("--version").output().unwrap();
+    assert!(o.status.success());
+    assert_eq!(text(&o), format!("tetron-bmctui {}\n", env!("CARGO_PKG_VERSION")));
+}

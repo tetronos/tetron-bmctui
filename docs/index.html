@@ -139,12 +139,16 @@ footer { margin-top:56px; padding-bottom:40px; border-top:1px solid var(--line);
 </section>
 <section>
 <h2>Get started</h2>
-<p>You need Linux and <code>ipmitool</code>. Build from source with Rust 1.91 or newer:</p>
+<p>On Debian and Ubuntu, install from the tetronos apt repository. <code>ipmitool</code> comes with it:</p>
+<pre>sudo curl -fsSLo /usr/share/keyrings/tetronos-archive-keyring.gpg https://tetronos.github.io/apt/tetronos-archive-keyring.gpg
+sudo curl -fsSLo /etc/apt/sources.list.d/tetronos.sources https://tetronos.github.io/apt/tetronos.sources
+sudo apt update &amp;&amp; sudo apt install tetron-bmctui</pre>
+<p>Or build from source with Rust 1.91 or newer. You also need <code>ipmitool</code>:</p>
 <pre>git clone https://github.com/tetronos/tetron-bmctui
 cd tetron-bmctui
 cargo build --release
 target/release/tetron-bmctui -H 192.0.2.10 -U ADMIN --pass-file ~/.bmc-pass</pre>
-<p>The password file must have mode 0600. A binary for x86_64 Linux with glibc 2.39 or newer is on the <a href="https://github.com/tetronos/tetron-bmctui/releases">releases page</a>. See the <a href="https://github.com/tetronos/tetron-bmctui#readme">README</a> for the host list, keys and options.</p>
+<p>The password file must have mode 0600. Binaries for x86_64 and aarch64 Linux are on the <a href="https://github.com/tetronos/tetron-bmctui/releases">releases page</a>. See the <a href="https://github.com/tetronos/tetron-bmctui#readme">README</a> for the host list, keys and options.</p>
 </section>
 <section class="note">
 <p><strong>Early development.</strong> Written for Supermicro BMCs first and tested on hardware with one Supermicro H12 board. Not every action has been verified. It uses IPMI only, without Redfish or virtual media. Keep BMCs on a private network.</p>
