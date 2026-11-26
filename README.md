@@ -66,6 +66,10 @@ To print one screen as text, for example in a script:
 
 Run `tetron-bmctui --help` for all options.
 
+## Pasting
+
+Paste into a field with the paste keys of your terminal, often `Ctrl`, `Shift`, `V`. Pasted text goes only into an open text field or to a connected console. It never runs a command or confirms a dialog. A field takes one line of plain ASCII, and a line break at the end is left off. If the text does not fit, for example a password over 20 characters, nothing is inserted and the program says why. A paste into the console is sent as it is, so every line break in it presses Return on the server. This needs a terminal with bracketed paste, as most have.
+
 ## Several servers
 
 **Picking a server:** click its tab in the top bar or press its number. On the **Hosts** screen, click or move to a server to select it. To connect, press `Enter`, click its row again, or click `[ Connect ]`. Selecting alone does not contact it.

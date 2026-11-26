@@ -12,7 +12,7 @@ mod view;
 use app::{App, Msg};
 use crossterm::{
     cursor,
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind},
+    event::{self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event, KeyEventKind},
     execute, queue,
     terminal,
 };
@@ -265,12 +265,13 @@ struct TermGuard;
 /// Switch the terminal to the state the UI needs.
 fn term_setup() -> io::Result<()> {
     terminal::enable_raw_mode()?;
-    execute!(io::stdout(), terminal::EnterAlternateScreen, cursor::Hide, EnableMouseCapture)
+    // Bracketed paste keeps pasted text apart from typed keys.
+    execute!(io::stdout(), terminal::EnterAlternateScreen, cursor::Hide, EnableMouseCapture, EnableBracketedPaste)
 }
 
 /// Give the terminal back, for exit and for the full screen console.
 fn term_restore() {
-    let _ = execute!(io::stdout(), DisableMouseCapture, cursor::Show, terminal::LeaveAlternateScreen);
+    let _ = execute!(io::stdout(), DisableBracketedPaste, DisableMouseCapture, cursor::Show, terminal::LeaveAlternateScreen);
     let _ = terminal::disable_raw_mode();
 }
 
@@ -429,6 +430,10 @@ fn run(opts: Opts) -> io::Result<()> {
                     dirty = true;
                 }
                 Event::Mouse(m) => dirty |= app.mouse(m),
+                Event::Paste(text) => {
+                    app.paste(&text);
+                    dirty = true;
+                }
                 Event::Resize(..) => dirty = true,
                 _ => {}
             }

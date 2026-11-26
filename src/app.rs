@@ -110,6 +110,24 @@ pub enum Mode {
     Confirm { act: Action, anchor: Option<(usize, usize)>, from_power: bool },
 }
 
+/// Longest filter text.
+const FILTER_MAX: usize = 40;
+
+/// What a text field accepts from a paste of `text` when it already holds
+/// `have` characters. Line breaks at the end, as a copied line has, are left
+/// off. Anything else that does not fit is refused as a whole: dropping or
+/// cutting characters would silently save a wrong password.
+fn field_text(text: &str, have: usize, max: usize) -> Result<&str, String> {
+    let t = text.trim_end_matches(['\r', '\n']);
+    if !t.chars().all(|c| c == ' ' || c.is_ascii_graphic()) {
+        Err("nothing pasted: only one line of plain ASCII is accepted".into())
+    } else if have + t.len() > max {
+        Err(format!("nothing pasted: this field takes at most {max} characters"))
+    } else {
+        Ok(t)
+    }
+}
+
 /// Labels of the fields of the add host form, in order.
 pub const FORM_FIELDS: [&str; 5] = ["Name", "Address", "User", "Password file", "or Password"];
 /// The password field, which is shown as stars.
@@ -1038,7 +1056,7 @@ impl App {
     fn filter_key(&mut self, code: KeyCode, mods: KeyModifiers) -> bool {
         match code {
             KeyCode::Char(c) if !mods.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
-                if self.filter.len() < 40 {
+                if self.filter.len() < FILTER_MAX {
                     self.filter.push(c);
                     self.filter_changed();
                 }
@@ -1312,6 +1330,50 @@ impl App {
             _ => Mode::Normal,
         };
         self.status = "cancelled, nothing was run".into();
+    }
+
+    // ----- paste ------------------------------------------------------------
+
+    /// Text pasted into the terminal. It arrives in one piece, apart from typed
+    /// keys, so it can never act as a command or confirm a dialog. It goes into
+    /// the open text field or to the console, and is ignored anywhere else.
+    pub fn paste(&mut self, text: &str) {
+        self.touch();
+        self.clicked_host = None;
+        self.prefix_pending = false;
+        let typing = self.typing();
+        match &mut self.mode {
+            Mode::AddHost(form) => {
+                let password = form.field == FORM_PASSWORD;
+                let max = if password { hosts::PASSWORD_MAX } else { FIELD_MAX };
+                match field_text(text, form.value(form.field).len(), max) {
+                    Ok(t) => {
+                        form.value_mut().push_str(t);
+                        form.error.clear();
+                    }
+                    // The pasted text is not repeated: it may be a password.
+                    Err(why) => form.error = why,
+                }
+            }
+            Mode::Normal if self.filtering => match field_text(text, self.filter.len(), FILTER_MAX) {
+                Ok(t) => {
+                    self.filter.push_str(t);
+                    self.filter_changed();
+                }
+                Err(why) => self.status = why,
+            },
+            Mode::Normal if typing => {
+                // A terminal sends Return for each line break.
+                let bytes = text.replace("\r\n", "\r").replace('\n', "\r").into_bytes();
+                if let Some(c) = &self.console {
+                    c.scroll_to_live();
+                    c.send(bytes);
+                }
+            }
+            Mode::Normal => self.status = "paste ignored: no text field is open".into(),
+            // Dialogs and menus take no text.
+            _ => {}
+        }
     }
 
     // ----- keyboard ---------------------------------------------------------
@@ -2220,6 +2282,73 @@ mod tests {
         assert_eq!(highlighted_rows(&mut a), [2]);
         click(&mut a, Hit::Row(1));
         assert_eq!(highlighted_rows(&mut a), [1]);
+    }
+
+    #[test]
+    fn paste_fills_a_field_exactly_and_never_submits() {
+        let mut a = two_hosts();
+        a.switch(Screen::Hosts);
+        a.open_add_host();
+        let secret = r#"P@ss w0rd!$'"\;|&y{}#`"#.get(..20).unwrap();
+        if let Mode::AddHost(f) = &mut a.mode {
+            f.field = FORM_PASSWORD;
+        }
+        // With the line break a copied line often carries.
+        a.paste(&format!("{secret}\r\n"));
+        assert!(matches!(&a.mode, Mode::AddHost(f) if f.host.password == secret && f.error.is_empty()));
+        assert!(a.want_add.is_none());
+    }
+
+    #[test]
+    fn paste_that_does_not_fit_changes_nothing() {
+        let mut a = two_hosts();
+        a.open_add_host();
+        if let Mode::AddHost(f) = &mut a.mode {
+            f.field = FORM_PASSWORD;
+        }
+        a.paste("keep");
+        for (text, why) in [("x".repeat(17), "at most 20"), ("one\ny".into(), "one line"), ("tab\there".into(), "plain ASCII"), ("p\u{e4}ss".into(), "plain ASCII")] {
+            a.paste(&text);
+            let Mode::AddHost(f) = &a.mode else { panic!("form closed by {text:?}") };
+            assert!(f.host.password == "keep" && f.error.contains(why), "{}", f.error);
+            assert!(!f.error.contains(&text), "the text is not echoed");
+        }
+        // Other fields are longer: a path can be pasted whole.
+        if let Mode::AddHost(f) = &mut a.mode {
+            f.field = 3;
+        }
+        let path = format!("/home/someone/{}", "d".repeat(80));
+        a.paste(&path);
+        assert!(matches!(&a.mode, Mode::AddHost(f) if f.host.pass_file == path));
+    }
+
+    #[test]
+    fn paste_never_runs_commands_or_confirms() {
+        let mut a = app(120, 28);
+        open_power(&mut a);
+        a.paste("uyq\ny\n");
+        assert!(!a.unlocked && !a.quit && a.queue.is_empty() && matches!(a.mode, Mode::Normal));
+        unlock(&mut a);
+        press(&mut a, KeyCode::Enter); // confirm dialog for the first action
+        assert!(matches!(a.mode, Mode::Confirm { .. }));
+        a.paste("y");
+        assert!(matches!(a.mode, Mode::Confirm { .. }) && a.queue.is_empty());
+        a.mode = Mode::Normal;
+        a.switch(Screen::Sensors);
+        press(&mut a, KeyCode::Char('/'));
+        a.paste("CPU1 Temp\n");
+        assert_eq!(a.filter, "CPU1 Temp");
+    }
+
+    #[test]
+    fn paste_reaches_the_console_only_while_typing() {
+        let mut a = app(120, 28);
+        let rx = with_console(&mut a, b"");
+        a.paste("ls -l\r\ncd /tmp\n");
+        assert_eq!(sent(&rx), b"ls -l\rcd /tmp\r");
+        a.focus = Pane::Details;
+        a.paste("reboot\n");
+        assert!(sent(&rx).is_empty());
     }
 
     #[test]
