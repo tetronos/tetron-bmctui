@@ -48,6 +48,8 @@ The password is never accepted on the command line.
 
 Options:
   --relock MINUTES    lock writes after this idle time (default 15, 0 never)
+  --refresh SECONDS   start with Live on, refreshing every SECONDS, 5 to 3600
+                      (default 0: off. When turned on by hand, every 30)
   --console-size CxR  size of the emulated console (default 100x31)
   --console-mono      show the console without colors
   --scrollback N      console lines kept (default 50000, max 200000)
@@ -68,6 +70,7 @@ Keys (? lists them in the program):
   p                   power menu
   1 to 9              switch host
   /  e  r  d          filter, export, refresh, details
+  l                   Live: refresh Overview or Sensors repeatedly
   S                   full screen serial console
   a                   add a host (on the Hosts screen)
   q                   quit
@@ -94,6 +97,8 @@ struct Opts {
     console: console::Settings,
     prefix: u8,
     efi_boot: bool,
+    /// Seconds between Live refreshes when asked for at startup. 0 is off.
+    refresh: u64,
     /// Where added hosts are saved: the list in use, or the default one.
     list_path: Option<PathBuf>,
     console_mono: bool,
@@ -136,6 +141,7 @@ fn parse_args() -> Result<Opts, String> {
     let mut prefix = app::DEFAULT_PREFIX;
     let (mut efi_boot, mut export_dir) = (false, None);
     let mut console_mono = false;
+    let mut refresh = 0;
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
         let mut val = |name: &str| it.next().ok_or(format!("{name} needs a value"));
@@ -169,6 +175,8 @@ fn parse_args() -> Result<Opts, String> {
             "--scrollback" => console.scrollback = val("--scrollback")?.parse().ok().filter(|n| *n <= 200_000).ok_or("--scrollback needs a number up to 200000")?,
             "--prefix" => prefix = parse_prefix(&val("--prefix")?).ok_or("--prefix needs one of a-z (not h i j m) or \\ ] ^ _")?,
             "--efi-boot" => efi_boot = true,
+            // At least 5 s: a BMC answers slowly.
+            "--refresh" => refresh = val("--refresh")?.parse().ok().filter(|n| *n == 0 || (5..=3600).contains(n)).ok_or("--refresh needs 0, or 5 to 3600 seconds")?,
             "--console-mono" => console_mono = true,
             "--export-dir" => export_dir = Some(PathBuf::from(val("--export-dir")?)),
             "--dump" => {
@@ -213,7 +221,7 @@ fn parse_args() -> Result<Opts, String> {
             (vec![t], 0)
         }
     };
-    Ok(Opts { hosts, current, dump, relock, console, prefix, efi_boot, console_mono, export_dir, list_path })
+    Ok(Opts { hosts, current, dump, relock, console, prefix, efi_boot, console_mono, export_dir, list_path, refresh })
 }
 
 /// Raw mode, alternate screen and mouse capture. Dropping the guard restores
@@ -335,13 +343,17 @@ fn redraw(app: &mut App, out: &mut impl Write) -> io::Result<()> {
 }
 
 fn run(opts: Opts) -> io::Result<()> {
-    let Opts { hosts, current, relock, console, prefix, efi_boot, console_mono, export_dir, list_path, .. } = opts;
+    let Opts { hosts, current, relock, console, prefix, efi_boot, console_mono, export_dir, list_path, refresh, .. } = opts;
     let export_dir = export_dir.or_else(|| ipmi::state_dir().map(|d| d.join("exports")));
     let (tx, rx): (Sender<Msg>, Receiver<Msg>) = mpsc::channel();
     let mut app = App::new(hosts, current, relock, tx.clone());
     app.console_settings = console;
     app.prefix = prefix;
     app.efi_boot = efi_boot;
+    if refresh > 0 {
+        app.live_every = Duration::from_secs(refresh);
+        app.live = true;
+    }
     app.console_mono = console_mono;
     // Threads that are ending console sessions.
     let mut closers: Vec<JoinHandle<()>> = vec![];

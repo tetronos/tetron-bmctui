@@ -6,15 +6,20 @@ use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// `HH:MM` local time now. The standard library has no time zones.
+/// `HH:MM` local time now.
 pub fn clock() -> String {
+    clock_seconds().chars().take(5).collect()
+}
+
+/// `HH:MM:SS` local time now. The standard library has no time zones.
+pub fn clock_seconds() -> String {
     let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0) as libc::time_t;
     // SAFETY: `tm` is plain data, and localtime_r only writes into it.
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
     if unsafe { libc::localtime_r(&now, &mut tm) }.is_null() {
-        return "??:??".into();
+        return "??:??:??".into();
     }
-    format!("{:02}:{:02}", tm.tm_hour, tm.tm_min)
+    format!("{:02}:{:02}:{:02}", tm.tm_hour, tm.tm_min, tm.tm_sec)
 }
 
 /// Save `lines` in a new file below `dir` and return its path. The file is
@@ -56,7 +61,7 @@ mod tests {
         assert!(a != b && a.parent() == Some(dir.as_path()));
         assert_eq!(std::fs::metadata(&a).unwrap().mode() & 0o777, 0o600);
         assert!(std::fs::read_to_string(&a).unwrap().ends_with("a?[2Jb\n"));
-        assert_eq!(clock().len(), 5);
+        assert_eq!((clock().len(), clock_seconds().len()), (5, 8));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

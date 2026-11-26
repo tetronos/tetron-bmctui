@@ -7,7 +7,7 @@
 //!   97 to 119             navigation, main; details on request
 //!   below 97              one pane; navigation opens as an overlay
 
-use crate::app::{App, FORM_FIELDS, FORM_PASSWORD, Hit, HostForm, Mode, NAV, Pane, Then};
+use crate::app::{self, App, FORM_FIELDS, FORM_PASSWORD, Hit, HostForm, Mode, NAV, Pane, Then};
 use crate::canvas::{Canvas, Rect, TermStyle};
 use crate::ipmi::{self, Screen};
 use crate::view::{self, Kind, wrap};
@@ -318,12 +318,24 @@ fn draw_console_details(app: &mut App, c: &mut Canvas, r: Rect) {
 
 fn draw_main(app: &mut App, c: &mut Canvas, r: Rect) {
     let mut title = app.screen.title().to_string();
+    // How old the data is, since nothing refreshes it unless Live is on.
+    if let Some(at) = app.updated.get(&app.screen) {
+        let word = if app.stale.contains(&app.screen) { "NOT updated since" } else { "updated" };
+        title = format!("{title}  {word} {at}");
+    }
     if app.filtering {
         title = format!("{title}  /{}_", app.filter);
     } else if !app.filter.is_empty() {
         title = format!("{title}  /{}  (Esc clears)", app.filter);
     }
     pane(app, c, r, Pane::Main, &title);
+    // The Live button sits at the right of the top border.
+    let mut corner = r.x + r.w.saturating_sub(1);
+    if app::can_be_live(app.screen) {
+        let label = if app.live { "[ Live: ON ]" } else { "[ Live: off ]" };
+        corner = corner.saturating_sub(label.len() + 1);
+        button(app, c, corner, r.y, label, Hit::Live, if app.live { Kind::Sel } else { Kind::Head });
+    }
     let a = inner(r);
     app.view_rows = a.h.max(1);
     app.scroll = app.scroll.min(app.max_scroll());
@@ -340,7 +352,7 @@ fn draw_main(app: &mut App, c: &mut Canvas, r: Rect) {
     }
     // Show that there is more above or below.
     if app.scroll > 0 {
-        c.text(r.x + r.w.saturating_sub(8), r.y, 6, " more ", Kind::Dim);
+        c.text(corner.saturating_sub(7), r.y, 6, " more ", Kind::Dim);
     }
     if app.scroll < app.max_scroll() {
         c.text(r.x + r.w.saturating_sub(8), r.y + r.h - 1, 6, " more ", Kind::Dim);
@@ -431,6 +443,9 @@ fn key_hints(app: &mut App, c: &mut Canvas, y: usize) {
         }
         hints.push(("Tab pane", KeyCode::Tab));
         hints.push(("r refresh", KeyCode::Char('r')));
+        if app::can_be_live(app.screen) {
+            hints.push(("l live", KeyCode::Char('l')));
+        }
         hints.push(("d details", KeyCode::Char('d')));
         if app.screen != Screen::Console {
             hints.push(("e export", KeyCode::Char('e')));
@@ -455,6 +470,7 @@ fn help_text(app: &App) -> Vec<String> {
         "e               export screen to a file",
         "d               show or hide details",
         "r               refresh",
+        "l               Live: refresh repeatedly",
         "p               power menu",
         "a               add host (Hosts screen)",
         "S               full screen console",

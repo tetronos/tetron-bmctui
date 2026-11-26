@@ -97,11 +97,20 @@ You can click screens, host tabs, rows, buttons and key hints. The mouse wheel s
 | `a` | add a server (Hosts screen) |
 | `d` | show or hide details |
 | `r` | refresh |
+| `l` | Live on or off (Overview and Sensors) |
 | `S` | full screen serial console |
 | `?` | help |
 | `q` | quit |
 
 In a narrow terminal one pane is shown at a time. Open the screen list with `[menu]` or `Tab`.
+
+## Refreshing
+
+A screen gets its data when you open it, when you press `r` and after an action. **Nothing refreshes by itself.** The title shows when the data was read. If a refresh fails, old readings stay and the title says that they were not updated. Power and fan state are never kept after a failure.
+
+To watch readings, turn on **Live** on the Overview or Sensors screen with `l` or `[ Live: off ]`. It refreshes every 30 seconds while that screen is open. It turns off when you leave the screen, switch servers or a refresh fails. `--refresh SECONDS` starts with Live on and sets the interval (5 to 3600).
+
+This program does not monitor your server or send alerts.
 
 ## Serial console
 
@@ -148,7 +157,7 @@ Fan modes use Supermicro-specific commands and are available on Supermicro BMCs 
 - Writes lock again after 15 minutes without input. `--relock MINUTES` changes this, and `0` turns it off.
 - **A connected console stays usable after this lock.** Anyone at your terminal can type into the server until you disconnect.
 - Actions and console sessions are recorded in `~/.local/state/tetron-bmctui/audit.log`. An action is refused if it can not be recorded. Keystrokes are never recorded.
-- After an apparent login or connection failure, automatic refresh stops, because repeated wrong passwords can lock a BMC account.
+- After an apparent login or connection failure, the program makes no more requests by itself until you press `r`, because repeated wrong passwords can lock a BMC account.
 - Text from the BMC and the console pane is filtered before it reaches your terminal. **The full screen console (`S`) is not filtered.**
 - Exports are new files that only you can read, in `~/.local/state/tetron-bmctui/exports/` or the folder given with `--export-dir`. They can contain serial numbers and addresses.
 - IPMI over LAN has known security weaknesses. Keep BMCs on a private management network or a VPN, never on the open internet.

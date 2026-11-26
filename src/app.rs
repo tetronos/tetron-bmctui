@@ -31,6 +31,14 @@ pub const NAV: [Screen; 8] = [
     Screen::Hosts,
 ];
 
+/// Seconds between refreshes while Live is on, unless `--refresh` says else.
+pub const LIVE_SECONDS: u64 = 30;
+
+/// Screens that can be refreshed repeatedly with Live.
+pub fn can_be_live(s: Screen) -> bool {
+    matches!(s, Screen::Dash | Screen::Sensors)
+}
+
 /// Default console command key: Ctrl-], as in telnet.
 pub const DEFAULT_PREFIX: u8 = 0x1d;
 
@@ -56,6 +64,8 @@ pub enum Hit {
     /// A host tab in the top bar, by index in `App::hosts`.
     Host(usize),
     /// The power button in the top bar, and an entry of the power menu.
+    /// The Live button of the open screen.
+    Live,
     /// The "add host" button, and a field of its form.
     AddHost,
     Field(usize),
@@ -158,8 +168,9 @@ pub struct HostState {
     pub checked: Option<String>,
     /// The BMC's own address, once read.
     pub lan: Option<ipmi::Lan>,
-    /// Auto refresh is stopped after a login failure. This is per host, so that
-    /// switching away and back does not start retrying a wrong password.
+    /// Requests the user did not ask for are stopped after a login failure.
+    /// This is per host, so that switching away and back does not start
+    /// retrying a wrong password.
     halt_auto: bool,
 }
 
@@ -216,6 +227,13 @@ pub struct App {
     pub filter: String,
     /// The filter is being typed.
     pub filtering: bool,
+    /// Repeated refresh of the open screen. Off unless asked for.
+    pub live: bool,
+    pub live_every: Duration,
+    /// When each screen last got data, for its title.
+    pub updated: HashMap<Screen, String>,
+    /// Screens that still show old data because the latest refresh failed.
+    pub stale: HashSet<Screen>,
     pub help_scroll: usize,
     /// Selected entry of the power menu.
     pub power_cursor: usize,
@@ -278,6 +296,10 @@ impl App {
             was_live: false,
             filter: String::new(),
             filtering: false,
+            live: false,
+            live_every: Duration::from_secs(LIVE_SECONDS),
+            updated: HashMap::new(),
+            stale: HashSet::new(),
             help_scroll: 0,
             power_cursor: 0,
             want_add: None,
@@ -342,13 +364,37 @@ impl App {
                 self.loading.remove(&s);
                 self.states[self.current].session_ok = Some(r.is_ok());
                 self.states[self.current].checked = Some(crate::export::clock());
-                if let Err(e) = &r
-                    && ipmi::looks_like_auth_error(e)
-                {
-                    self.states[self.current].halt_auto = true;
-                    self.status = "connection or login failed: auto refresh stopped (wrong password can lock the BMC account). r retries once.".into();
+                match r {
+                    Ok(text) => {
+                        self.updated.insert(s, crate::export::clock_seconds());
+                        self.stale.remove(&s);
+                        self.data.insert(s, Ok(text));
+                    }
+                    Err(e) => {
+                        // A failure ends Live: it must not repeat by itself.
+                        let was_live = self.live && s == self.screen;
+                        if was_live {
+                            self.live = false;
+                        }
+                        let first = e.lines().next().unwrap_or("").to_string();
+                        // Old readings stay, marked as old. Power and fan state
+                        // do not: an old state must not pass for the current one.
+                        if !matches!(s, Screen::Control | Screen::Fan) && matches!(self.data.get(&s), Some(Ok(_))) {
+                            self.stale.insert(s);
+                            self.status = format!("{} not updated{}: {first}", s.title(), if was_live { ", Live off" } else { "" });
+                        } else {
+                            if was_live {
+                                self.status = format!("refresh failed, Live off: {first}");
+                            }
+                            self.updated.remove(&s);
+                            self.data.insert(s, Err(e.clone()));
+                        }
+                        if ipmi::looks_like_auth_error(&e) {
+                            self.states[self.current].halt_auto = true;
+                            self.status = "connection or login failed: no more requests by themselves (a wrong password can lock the BMC account). r retries once.".into();
+                        }
+                    }
                 }
-                self.data.insert(s, r);
             }
             Msg::Vendor(_, v) => {
                 self.vendor_pending = false;
@@ -374,7 +420,7 @@ impl App {
         }
     }
 
-    /// Periodic work: idle relock and auto refresh of the live screens.
+    /// Periodic work: console output, idle relock and Live.
     pub fn tick(&mut self, now: Instant) -> bool {
         let mut changed = false;
         // New console output needs a redraw. The idle relock below does not
@@ -403,9 +449,9 @@ impl App {
             self.lock(&format!("locked after {} min without input", limit.as_secs() / 60));
             changed = true;
         }
-        if !self.states[self.current].halt_auto && matches!(self.screen, Screen::Dash | Screen::Sensors) {
+        if self.live && !self.states[self.current].halt_auto && can_be_live(self.screen) {
             let s = self.screen;
-            if self.last.get(&s).is_none_or(|t| now.saturating_duration_since(*t) > Duration::from_secs(10)) {
+            if self.last.get(&s).is_none_or(|t| now.saturating_duration_since(*t) >= self.live_every) {
                 self.refresh(s);
                 changed = true;
             }
@@ -450,6 +496,9 @@ impl App {
         self.t = t;
         self.epoch += 1;
         self.data.clear();
+        self.updated.clear();
+        self.stale.clear();
+        self.live = false;
         self.loading.clear();
         self.last.clear();
         self.vendor = None;
@@ -817,6 +866,24 @@ impl App {
         view::actions(self.screen, self.vendor, self.efi_boot)
     }
 
+    // ----- live -------------------------------------------------------------
+
+    pub fn toggle_live(&mut self) {
+        if !can_be_live(self.screen) {
+            self.status = "Live works on Overview and Sensors".into();
+        } else if self.live {
+            self.live = false;
+            self.status = "Live off. r refreshes.".into();
+        } else if self.states[self.current].halt_auto {
+            self.status = "the last connection or login failed: refresh with r first".into();
+        } else {
+            self.live = true;
+            self.status = format!("Live on: refreshes every {} s while this screen is open", self.live_every.as_secs());
+            let s = self.screen;
+            self.refresh(s);
+        }
+    }
+
     // ----- filter, help, export ---------------------------------------------
 
     fn start_filter(&mut self) {
@@ -987,6 +1054,10 @@ impl App {
     }
 
     pub fn switch(&mut self, s: Screen) {
+        // Live belongs to the screen it was turned on for.
+        if s != self.screen {
+            self.live = false;
+        }
         self.screen = s;
         self.filter.clear();
         self.filtering = false;
@@ -1163,6 +1234,7 @@ impl App {
             KeyCode::Char('?') => self.open_help(),
             KeyCode::Char('/') => self.start_filter(),
             KeyCode::Char('e') => self.export(),
+            KeyCode::Char('l') => self.toggle_live(),
             KeyCode::Char('p') => self.open_power_menu(),
             KeyCode::Char('a') if self.screen == Screen::Hosts => self.open_add_host(),
             // Esc first removes a filter that is in effect.
@@ -1292,6 +1364,7 @@ impl App {
             }
             Hit::Host(i) => self.request_host(i),
             Hit::Power => self.open_power_menu(),
+            Hit::Live => self.toggle_live(),
             Hit::AddHost => self.open_add_host(),
             Hit::Field(_) => {}
             // Only drawn while the menu is open, which is handled above.
@@ -1875,6 +1948,70 @@ mod tests {
             let text: String = (0..h).map(|y| c.row(y)).collect();
             assert!(text.contains("NOT encrypted") && text.contains("advised"), "{w}x{h}");
         }
+    }
+
+    /// Has a refresh of the open screen been started by the clock?
+    fn ticks_refresh(a: &mut App, after: u64) -> bool {
+        a.loading.clear();
+        a.tick(Instant::now() + Duration::from_secs(after));
+        a.loading.contains(&a.screen)
+    }
+
+    #[test]
+    fn nothing_refreshes_by_itself_unless_live() {
+        let mut a = app(120, 28);
+        for s in NAV {
+            a.switch(s);
+            assert!(!ticks_refresh(&mut a, 3600), "{s:?}");
+        }
+        a.switch(Screen::Sensors);
+        ui::draw(&mut a, 120, 28);
+        click(&mut a, Hit::Live);
+        assert!(a.live && a.loading.contains(&Screen::Sensors), "on refreshes at once");
+        a.live_every = Duration::from_secs(30);
+        assert!(!ticks_refresh(&mut a, 20) && ticks_refresh(&mut a, 31));
+        press(&mut a, KeyCode::Char('l'));
+        assert!(!a.live && !ticks_refresh(&mut a, 3600));
+        // Leaving the screen or the host ends it. Reopening the same one does not.
+        press(&mut a, KeyCode::Char('l'));
+        a.switch(Screen::Sensors);
+        assert!(a.live);
+        a.switch(Screen::Dash);
+        assert!(!a.live);
+        a.switch(Screen::Sel);
+        press(&mut a, KeyCode::Char('l'));
+        assert!(!a.live && a.status.contains("Overview and Sensors"));
+        let mut b = two_hosts();
+        press(&mut b, KeyCode::Char('l'));
+        press(&mut b, KeyCode::Char('2'));
+        assert!(!b.live);
+    }
+
+    #[test]
+    fn failed_refresh_keeps_old_data_and_says_so() {
+        let mut a = app(120, 28);
+        a.switch(Screen::Sensors);
+        let e = a.epoch;
+        a.on_msg(Msg::Data(e, Screen::Sensors, Ok("CPU1 Temp | 01h | ok | 3.1 | 38 C\n".into())));
+        let title = ui::draw(&mut a, 120, 28).row(1);
+        assert!(title.contains("updated ") && title.contains("[ Live: off ]"), "{title}");
+        press(&mut a, KeyCode::Char('l'));
+        a.on_msg(Msg::Data(e, Screen::Sensors, Err("timeout after 20 s".into())));
+        assert!(!a.live, "a failure ends Live");
+        assert!(a.status.contains("not updated") && a.status.contains("timeout"), "{}", a.status);
+        let c = ui::draw(&mut a, 120, 28);
+        assert!(c.row(1).contains("NOT updated since "), "{}", c.row(1));
+        assert!((0..28).any(|y| c.row(y).contains("CPU1 Temp")), "old readings stay");
+        a.on_msg(Msg::Data(e, Screen::Sensors, Ok("x | 01h | ok | 3.1 | 1 C\n".into())));
+        assert!(!ui::draw(&mut a, 120, 28).row(1).contains("NOT"));
+        // An old power state is never kept.
+        a.on_msg(Msg::Data(e, Screen::Control, Ok("Chassis Power is on\n".into())));
+        a.on_msg(Msg::Data(e, Screen::Control, Err("boom".into())));
+        assert!(a.power_state().0.contains("could not be read"));
+        // After a login failure Live stays off until r has been used.
+        a.on_msg(Msg::Data(e, Screen::Sensors, Err("Unable to establish RMCP+ session".into())));
+        press(&mut a, KeyCode::Char('l'));
+        assert!(!a.live && a.status.contains("with r first"), "{}", a.status);
     }
 
     #[test]
