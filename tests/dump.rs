@@ -103,6 +103,16 @@ fn host_list() {
     let o = dump("hosts", &["--hosts", &list, "--select", "two"], None);
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
     assert!(text(&o).contains("* two"), "{}", text(&o));
+    // This machine is listed after the saved hosts, and can be selected. A
+    // BMC_HOST in the environment must not turn it into a remote host.
+    assert!(text(&o).contains("localhost") && text(&o).contains("this machine"), "{}", text(&o));
+    let o = Command::new(bin())
+        .args(["--ipmitool", &fake(), "--dump", "hosts", "--hosts", &list, "--select", "localhost"])
+        .env("BMC_HOST", "10.9.9.9")
+        .env("BMC_USER", "someone")
+        .output()
+        .unwrap();
+    assert!(text(&o).contains("* localhost") && !text(&o).contains("10.9.9.9") && !text(&o).contains("someone"), "{}", text(&o));
     assert!(dump("sensors", &["--hosts", &list], None).status.success());
 
     for bad in [vec!["--hosts", &list, "--select", "nope"], vec!["--hosts", &list, "-H", "x"], vec!["--hosts", &list, "-U", "x"]] {
@@ -113,6 +123,13 @@ fn host_list() {
     write("pw", "s3cret\n", 0o644);
     assert_eq!(dump("hosts", &["--hosts", &list], None).status.code(), Some(2));
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn localhost_is_listed_without_a_saved_list() {
+    let t = text(&dump("hosts", &[], None));
+    assert!(t.contains("* localhost"), "{t}");
+    assert_eq!(t.matches("localhost").count(), 1, "{t}");
 }
 
 #[test]
@@ -143,12 +160,12 @@ fn saved_hosts_are_kept_next_to_a_command_line_host() {
         c.output().unwrap()
     };
     let t = text(&run(&[]));
-    assert!(t.contains("* 10.0.0.9") && t.contains("  saved"), "{t}");
+    assert!(t.contains("* 10.0.0.9") && t.contains("  saved") && t.contains("  localhost"), "{t}");
     assert!(text(&run(&["--select", "saved"])).contains("* saved"));
     assert_eq!(run(&["--select", "nobody"]).status.code(), Some(2));
     // A broken list does not stop the named host.
     write(&list, "nonsense", 0o600);
     let o = run(&[]);
-    assert!(o.status.success() && text(&o).contains("* 10.0.0.9"));
+    assert!(o.status.success() && text(&o).contains("* 10.0.0.9") && text(&o).contains("  localhost"));
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -58,7 +58,7 @@ Connect, using the address and user of your BMC:
 
     tetron-bmctui -H 192.0.2.10 -U ADMIN --pass-file ~/.bmc-pass
 
-The `IPMI_PASSWORD` environment variable works instead of `--pass-file`. The password is never accepted on the command line. `BMC_HOST` and `BMC_USER` can replace `-H` and `-U`. The list offers this machine's own BMC when it has one, and also when you have no saved servers.
+The `IPMI_PASSWORD` environment variable works instead of `--pass-file`. The password is never accepted on the command line. `BMC_HOST` and `BMC_USER` can replace `-H` and `-U`. The Hosts list always includes `localhost`, this machine's own BMC. It needs `/dev/ipmi0` and usually root. The serial console normally works only over the network, and local use is not yet tested.
 
 To print one screen as text, for example in a script:
 
@@ -193,7 +193,7 @@ From the source folder, this runs the interface with fake readings. Actions are 
 
     env -u BMC_HOST -u BMC_USER target/release/tetron-bmctui --ipmitool "$PWD/tests/fake-ipmitool.sh"
 
-On the Hosts screen, select a server (`local` if you have no saved list) and press `Enter`.
+On the Hosts screen, select a server (`localhost` if you have no saved list) and press `Enter`.
 
 If you have a host list, add `XDG_CONFIG_HOME=/nonexistent` after `env -u BMC_HOST -u BMC_USER`.
 

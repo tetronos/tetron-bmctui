@@ -119,9 +119,15 @@ pub fn fan_name(b: u8) -> &'static str {
 }
 
 impl Target {
+    /// This machine's own BMC, reached in-band. It never carries an address,
+    /// user or password, whatever the command line or environment say.
+    pub fn local(bin: &str) -> Target {
+        Target { bin: bin.to_string(), name: None, host: None, user: None, iface: "lanplus".into(), pass_file: None }
+    }
+
     /// Short name for the host bar, status line and audit log.
     pub fn label(&self) -> String {
-        self.name.clone().or_else(|| self.host.clone()).unwrap_or_else(|| "local".into())
+        self.name.clone().or_else(|| self.host.clone()).unwrap_or_else(|| "localhost".into())
     }
 
     /// Name and address together, for dialogs and the audit log: a list name

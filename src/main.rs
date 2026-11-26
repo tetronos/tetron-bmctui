@@ -35,7 +35,7 @@ usage: tetron-bmctui [connection] [options]
 
 Connection: one host from the command line, or a host list. Without -H,
 BMC_HOST or --select the program starts on the host list and contacts nothing
-until a host is chosen. With no saved hosts the list offers this machine's own
+until a host is chosen. The list always includes localhost, this machine's own
 BMC (/dev/ipmi0).
   -H host             BMC address (env BMC_HOST)
   -U user             BMC user (env BMC_USER)
@@ -111,11 +111,6 @@ struct Opts {
     list_path: Option<PathBuf>,
     console_mono: bool,
     export_dir: Option<PathBuf>,
-}
-
-/// Linux device names of a local BMC, the ones ipmitool tries.
-fn has_local_bmc() -> bool {
-    ["/dev/ipmi0", "/dev/ipmi/0", "/dev/ipmidev/0"].iter().any(|p| Path::new(p).exists())
 }
 
 /// "80x24" -> (80, 24), within sizes a console can sensibly have.
@@ -224,12 +219,10 @@ fn parse_args() -> Result<Opts, String> {
                 return Err(format!("-U, -I and --pass-file do not apply to the host list {}", path.display()));
             }
             let mut all = hosts::load(&path, &t.bin)?;
-            // The BMC of this machine can be picked too, if there is one.
-            if has_local_bmc() {
-                all.push(t.clone());
-            }
+            // This machine can always be picked, after the saved hosts.
+            all.push(Target::local(&t.bin));
             let current = match &select {
-                Some(n) => all.iter().position(|h| h.name.as_ref() == Some(n)).ok_or(format!("no host named {n} in {}", path.display()))?,
+                Some(n) => all.iter().position(|h| &h.label() == n).ok_or(format!("no host named {n} in {}", path.display()))?,
                 None => 0,
             };
             (all, current)
@@ -251,8 +244,12 @@ fn parse_args() -> Result<Opts, String> {
                     Err(e) => warning = Some(format!("saved hosts not loaded: {e}")),
                 }
             }
+            // Without -H the one entry already is this machine.
+            if all[0].host.is_some() {
+                all.push(Target::local(&all[0].bin));
+            }
             let current = match &select {
-                Some(n) => all.iter().position(|h| h.name.as_ref() == Some(n)).ok_or(format!("--select: no saved host named {n}"))?,
+                Some(n) => all.iter().position(|h| &h.label() == n).ok_or(format!("--select: no saved host named {n}"))?,
                 None => 0,
             };
             (all, current)

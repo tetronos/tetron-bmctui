@@ -120,9 +120,13 @@ pub fn details(s: Screen, c: &Ctx, width: usize) -> Vec<Line> {
         if let Some(h) = c.cursor.checked_sub(1).and_then(|i| c.hosts.get(i)) {
             v.push((h.label(), Kind::Head));
             v.push((String::new(), Kind::Normal));
-            let pass = h.pass_file.clone().unwrap_or_else(|| "IPMI_PASSWORD".into());
+            let pass = match (&h.pass_file, &h.host) {
+                (Some(file), _) => file.clone(),
+                (None, Some(_)) => "IPMI_PASSWORD".into(),
+                (None, None) => "none needed".into(),
+            };
             for (name, value) in [
-                ("address", h.host.clone().unwrap_or_else(|| "in-band (/dev/ipmi0)".into())),
+                ("address", h.host.clone().unwrap_or_else(|| "this machine (/dev/ipmi0)".into())),
                 ("user", h.user.clone().unwrap_or_else(|| "(none)".into())),
                 ("interface", h.iface.clone()),
                 ("password from", pass),
@@ -269,7 +273,7 @@ fn hosts_screen(c: &Ctx) -> Vec<Line> {
     let mut v = vec![(format!("  {:<16} {:<24} {}", "NAME", "ADDRESS", "USER"), Kind::Head)];
     for (i, h) in c.hosts.iter().enumerate() {
         let mark = if i == c.current { "*" } else { " " };
-        let line = format!("{mark} {:<16} {:<24} {}", h.label(), h.host.as_deref().unwrap_or("in-band"), h.user.as_deref().unwrap_or(""));
+        let line = format!("{mark} {:<16} {:<24} {}", h.label(), h.host.as_deref().unwrap_or("this machine"), h.user.as_deref().unwrap_or(""));
         // Bold marks the host in use also while another row is selected.
         v.push((line, if i == c.current { Kind::Head } else { Kind::Normal }));
     }
