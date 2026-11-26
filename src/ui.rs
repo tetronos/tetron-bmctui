@@ -142,9 +142,15 @@ fn host_bar(app: &mut App, c: &mut Canvas) {
         Some(id) => format!("vendor {id}"),
         None => "vendor ?".into(),
     };
-    let right = room.saturating_sub(vendor.len());
-    if right > x {
-        c.text(right, 0, vendor.len(), &vendor, Kind::Dim);
+    // Right of the tabs: the BMC's IP and MAC with the vendor, as much of it
+    // as fits whole.
+    let mut choices = vec![vendor.clone()];
+    if let Some(lan) = &app.states[app.current].lan {
+        let address = format!("{} {}", lan.ip, lan.mac);
+        choices = vec![format!("{address}  {vendor}"), address, vendor];
+    }
+    if let Some(info) = choices.iter().find(|s| room.saturating_sub(s.len()) > x) {
+        c.text(room - info.len(), 0, info.len(), info, Kind::Dim);
     }
 }
 

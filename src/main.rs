@@ -404,7 +404,7 @@ fn dump(hosts: &[Target], current: usize, s: Screen) -> i32 {
     let vendor = if s == Screen::Fan { ipmi::fetch_vendor(t) } else { None };
     let data = ipmi::fetch(t, s);
     let failed = data.is_err();
-    for (l, _) in view::render(s, &view::Ctx { data: Some(&data), vendor, cursor: usize::MAX, loading: false, hosts, current, efi_boot: false }) {
+    for (l, _) in view::render(s, &view::Ctx { data: Some(&data), vendor, cursor: usize::MAX, loading: false, hosts, current, lan: None, efi_boot: false }) {
         // The same filter as on screen: BMC text never reaches the terminal raw.
         println!("{}", l.chars().map(canvas::safe_char).collect::<String>());
     }

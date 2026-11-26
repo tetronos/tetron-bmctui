@@ -25,6 +25,8 @@ pub struct Ctx<'a> {
     /// All configured hosts and the one in use, for the Hosts screen.
     pub hosts: &'a [ipmi::Target],
     pub current: usize,
+    /// The BMC address of the host in use, once read.
+    pub lan: Option<&'a ipmi::Lan>,
     /// Ask for UEFI boot with the one-time boot actions.
     pub efi_boot: bool,
 }
@@ -127,6 +129,15 @@ pub fn details(s: Screen, c: &Ctx, width: usize) -> Vec<Line> {
             ] {
                 v.push((name.into(), Kind::Dim));
                 v.push((value, Kind::Normal));
+            }
+            // Also here, for terminals too narrow to show it in the top bar.
+            if c.cursor == c.current + 1
+                && let Some(lan) = c.lan
+            {
+                for (name, value) in [("BMC IP", &lan.ip), ("BMC MAC", &lan.mac)] {
+                    v.push((name.into(), Kind::Dim));
+                    v.push((value.clone(), Kind::Normal));
+                }
             }
         }
     } else if let Some(a) = items.get(c.cursor) {
@@ -356,11 +367,11 @@ mod tests {
     #[test]
     fn fan_gate_for_other_vendor() {
         let d: Result<String, String> = Ok(" 01".into());
-        let c = Ctx { data: Some(&d), vendor: Some(674), cursor: 0, loading: false, hosts: &[], current: 0, efi_boot: false };
+        let c = Ctx { data: Some(&d), vendor: Some(674), cursor: 0, loading: false, hosts: &[], current: 0, lan: None, efi_boot: false };
         let v = render(Screen::Fan, &c);
         assert!(v[0].0.contains("not available"));
         assert!(actions(Screen::Fan, c.vendor, false).is_empty());
-        let c2 = Ctx { data: Some(&d), vendor: Some(ipmi::SUPERMICRO_ID), cursor: 1, loading: false, hosts: &[], current: 0, efi_boot: false };
+        let c2 = Ctx { data: Some(&d), vendor: Some(ipmi::SUPERMICRO_ID), cursor: 1, loading: false, hosts: &[], current: 0, lan: None, efi_boot: false };
         let v2 = render(Screen::Fan, &c2);
         assert!(v2[0].0.contains("Full speed"));
     }
@@ -368,7 +379,7 @@ mod tests {
     #[test]
     fn menu_stays_in_place_after_an_error() {
         let d: Result<String, String> = Err("boom".into());
-        let c = Ctx { data: Some(&d), vendor: None, cursor: 0, loading: false, hosts: &[], current: 0, efi_boot: false };
+        let c = Ctx { data: Some(&d), vendor: None, cursor: 0, loading: false, hosts: &[], current: 0, lan: None, efi_boot: false };
         let v = render(Screen::Control, &c);
         assert!(v[MENU_FIRST_LINE].0.contains("Power on"));
         assert!(v.iter().any(|l| l.0 == "error: boom"));
@@ -402,7 +413,7 @@ mod tests {
     #[test]
     fn error_lines() {
         let d: Result<String, String> = Err("boom".into());
-        let c = Ctx { data: Some(&d), vendor: None, cursor: 0, loading: false, hosts: &[], current: 0, efi_boot: false };
+        let c = Ctx { data: Some(&d), vendor: None, cursor: 0, loading: false, hosts: &[], current: 0, lan: None, efi_boot: false };
         assert_eq!(render(Screen::Sensors, &c)[0], ("error: boom".to_string(), Kind::Bad));
     }
 }

@@ -226,6 +226,30 @@ pub fn looks_like_auth_error(e: &str) -> bool {
     ["authentication", "rmcp+ session", "password", "privilege", "invalid user", "unauthorized"].iter().any(|k| l.contains(k))
 }
 
+/// Address of the BMC itself, from `lan print`.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Lan {
+    pub ip: String,
+    pub mac: String,
+}
+
+/// The `IP Address` and `MAC Address` lines of `lan print`. Other keys that
+/// start the same way, such as `IP Address Source`, are not matched.
+pub fn parse_lan(s: &str) -> Option<Lan> {
+    let get = |name: &str| {
+        s.lines().find_map(|l| {
+            // The value of a MAC holds colons: only the first one separates.
+            let (k, v) = l.split_once(':')?;
+            (k.trim() == name).then(|| v.trim().to_string()).filter(|v| !v.is_empty())
+        })
+    };
+    Some(Lan { ip: get("IP Address")?, mac: get("MAC Address")? })
+}
+
+pub fn fetch_lan(t: &Target) -> Option<Lan> {
+    t.run(&["lan".to_string(), "print".to_string()], Duration::from_secs(20)).ok().and_then(|s| parse_lan(&s))
+}
+
 pub struct Sensor {
     pub name: String,
     pub status: String,
@@ -366,6 +390,13 @@ mod tests {
         assert_eq!(parse_fan_mode(""), None);
         assert_eq!(parse_manufacturer("Device ID : 32\nManufacturer ID         : 10876\n"), Some(SUPERMICRO_ID));
         assert_eq!(parse_manufacturer("nothing"), None);
+    }
+
+    #[test]
+    fn lan_address() {
+        let s = "IP Address Source       : DHCP Address\nIP Address              : 192.0.2.10\nMAC Address             : 02:00:00:aa:bb:cc\nDefault Gateway MAC     : 00:00:00:00:00:00\n";
+        assert_eq!(parse_lan(s), Some(Lan { ip: "192.0.2.10".into(), mac: "02:00:00:aa:bb:cc".into() }));
+        assert_eq!(parse_lan("IP Address Source : DHCP\n"), None);
     }
 
     #[test]

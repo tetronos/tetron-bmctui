@@ -74,7 +74,7 @@ pass_file = "~/.bmc-pass-db01"
 
 The list and every password file must have mode 0600 (`chmod 600`). The list holds no passwords, only the path of each password file.
 
-The list is used when neither `-H` nor `BMC_HOST` is given. `--hosts FILE` names another list and `--select NAME` chooses the first server. Only the selected server is contacted, and each tab shows when its state was last checked.
+The list is used when neither `-H` nor `BMC_HOST` is given. `--hosts FILE` names another list and `--select NAME` chooses the first server. The top bar shows the IP and MAC address of the selected server's BMC when the terminal is wide enough; the Hosts screen shows them in its details too. Only the selected server is contacted, and each tab shows when its state was last checked.
 
 ## Keys and mouse
 

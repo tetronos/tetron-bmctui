@@ -106,6 +106,7 @@ pub enum Msg {
     /// Also carries the host name, to say where a late result belongs.
     Done(u64, String, String, Result<String, String>),
     Vendor(u64, Option<u32>),
+    Lan(u64, Option<ipmi::Lan>),
 }
 
 /// What is remembered about a host while another one is in use.
@@ -115,6 +116,8 @@ pub struct HostState {
     pub session_ok: Option<bool>,
     /// Local time of that result. A tab of another host shows how old it is.
     pub checked: Option<String>,
+    /// The BMC's own address, once read.
+    pub lan: Option<ipmi::Lan>,
     /// Auto refresh is stopped after a login failure. This is per host, so that
     /// switching away and back does not start retrying a wrong password.
     halt_auto: bool,
@@ -263,7 +266,8 @@ impl App {
         });
     }
 
-    /// Ask the BMC for its manufacturer id. The fan screen depends on it.
+    /// Ask the BMC for its manufacturer id, which the fan screen depends on,
+    /// and then for its own address.
     pub fn start_vendor(&mut self) {
         if self.vendor_pending {
             return;
@@ -271,14 +275,26 @@ impl App {
         self.vendor_pending = true;
         let (t, tx, epoch) = (self.t.clone(), self.tx.clone(), self.epoch);
         std::thread::spawn(move || {
-            let _ = tx.send(Msg::Vendor(epoch, ipmi::fetch_vendor(&t)));
+            let vendor = ipmi::fetch_vendor(&t);
+            let _ = tx.send(Msg::Vendor(epoch, vendor));
+            // One after the other, and only after a success: a wrong password
+            // is then not tried twice.
+            if vendor.is_some() {
+                let _ = tx.send(Msg::Lan(epoch, ipmi::fetch_lan(&t)));
+            }
         });
     }
 
     pub fn on_msg(&mut self, m: Msg) {
         match m {
             // Replies for a host that is no longer in use are dropped.
-            Msg::Data(e, ..) | Msg::Vendor(e, _) if e != self.epoch => {}
+            Msg::Data(e, ..) | Msg::Vendor(e, _) | Msg::Lan(e, _) if e != self.epoch => {}
+            Msg::Lan(_, lan) => {
+                // A failed read keeps what is already known.
+                if lan.is_some() {
+                    self.states[self.current].lan = lan;
+                }
+            }
             Msg::Data(_, s, r) => {
                 self.loading.remove(&s);
                 self.states[self.current].session_ok = Some(r.is_ok());
@@ -674,6 +690,7 @@ impl App {
             loading: self.loading.contains(&self.screen),
             hosts: &self.hosts,
             current: self.current,
+            lan: self.states[self.current].lan.as_ref(),
             efi_boot: self.efi_boot,
         })
     }
@@ -1037,7 +1054,7 @@ impl App {
             KeyCode::Char('S') => self.open_sol(),
             KeyCode::Char('r') => {
                 self.states[self.current].halt_auto = false;
-                if self.vendor.is_none() {
+                if self.vendor.is_none() || self.states[self.current].lan.is_none() {
                     self.start_vendor();
                 }
                 let s = self.screen;
@@ -1610,6 +1627,28 @@ mod tests {
         assert!(!a.loading.contains(&Screen::Dash));
         press(&mut a, KeyCode::Char('r'));
         assert!(a.loading.contains(&Screen::Dash));
+    }
+
+    #[test]
+    fn bmc_address_is_shown_when_it_fits() {
+        let mut a = two_hosts();
+        let lan = ipmi::Lan { ip: "192.0.2.10".into(), mac: "02:00:00:aa:bb:cc".into() };
+        let old = a.epoch;
+        a.on_msg(Msg::Lan(old, Some(lan.clone())));
+        let top = ui::draw(&mut a, 120, 28).row(0);
+        assert!(top.contains("192.0.2.10 02:00:00:aa:bb:cc") && top.contains("[ Power ]"), "{top}");
+        // Too narrow: tabs and the button win, and nothing is cut in half.
+        for w in 40..120 {
+            let top = ui::draw(&mut a, w, 28).row(0);
+            assert!(top.contains("[ Power ]"));
+            assert!(top.contains("02:00:00:aa:bb:cc") || !top.contains("02:00"), "{w}: {top}");
+        }
+        // Another host does not inherit it, also not from a late reply.
+        a.switch_host(1);
+        a.on_msg(Msg::Lan(old, Some(lan)));
+        assert!(!ui::draw(&mut a, 120, 28).row(0).contains("192.0.2.10"));
+        a.switch_host(0);
+        assert!(ui::draw(&mut a, 120, 28).row(0).contains("192.0.2.10"), "kept per host");
     }
 
     #[test]

@@ -19,6 +19,11 @@ case "$args" in
   echo "Power Overload       : false"
   echo "Main Power Fault     : false"
   ;;
+*"lan print"*)
+  echo "IP Address Source       : DHCP Address"
+  echo "IP Address              : 192.0.2.10"
+  echo "MAC Address             : 02:00:00:aa:bb:cc"
+  ;;
 *"mc info"*)
   echo "Device ID                 : 32"
   echo "Manufacturer ID           : 10876"
