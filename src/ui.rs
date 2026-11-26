@@ -129,7 +129,7 @@ fn host_bar(app: &mut App, c: &mut Canvas) {
         first += 1;
     }
     for (i, tab) in tabs.iter().enumerate().skip(first) {
-        let kind = if i == app.current { Kind::Head } else { Kind::Dim };
+        let kind = if i == app.current && app.chosen { Kind::Head } else { Kind::Dim };
         // The current tab is cut off rather than left out on a tiny screen.
         let label = if i == app.current { &tab[..tab.len().min(room.saturating_sub(x))] } else { tab.as_str() };
         if label.is_empty() || x + label.len() > room {
@@ -149,7 +149,7 @@ fn host_bar(app: &mut App, c: &mut Canvas) {
         let address = format!("{} {}", lan.ip, lan.mac);
         choices = vec![format!("{address}  {vendor}"), address, vendor];
     }
-    if let Some(info) = choices.iter().find(|s| room.saturating_sub(s.len()) > x) {
+    if let Some(info) = choices.iter().filter(|_| app.chosen).find(|s| room.saturating_sub(s.len()) > x) {
         c.text(room - info.len(), 0, info.len(), info, Kind::Dim);
     }
 }
@@ -179,7 +179,7 @@ fn host_buttons(app: &mut App, c: &mut Canvas, x: usize, y: usize) {
         if listed || app.hosts[i].host.is_some() {
             x = button(app, c, x, y, label, hit, Kind::Head) + 1;
         }
-        let kind = if i == app.current { Kind::Dim } else { Kind::Head };
+        let kind = if i == app.current && app.chosen { Kind::Dim } else { Kind::Head };
         // A narrower label keeps all three on a 40 column terminal.
         button(app, c, x, y, "[ Use ]", Hit::UseHost, kind);
     }
@@ -412,7 +412,8 @@ fn draw_details(app: &mut App, c: &mut Canvas, r: Rect) {
 fn status_line(app: &App, c: &mut Canvas, y: usize) {
     let (lock, kind) = if app.unlocked { (" WRITES UNLOCKED ", Kind::Warn) } else { (" read-only ", Kind::Head) };
     c.text(0, y, c.w, lock, kind);
-    let rest = format!("| {} | {}", app.t.label(), app.status);
+    let host = if app.chosen { app.t.label() } else { "no host chosen".into() };
+    let rest = format!("| {host} | {}", app.status);
     let mut x = lock.len();
     // A live console stays writable after a relock, so it is shown separately.
     if app.console_live() {
@@ -461,12 +462,19 @@ fn key_hints(app: &mut App, c: &mut Canvas, y: usize) {
         if !app.menu().is_empty() {
             hints.push(("Enter run", KeyCode::Enter));
         }
-        hints.push((if app.unlocked { "u lock" } else { "u unlock" }, KeyCode::Char('u')));
+        // These need a host in use.
+        if app.chosen {
+            hints.push((if app.unlocked { "u lock" } else { "u unlock" }, KeyCode::Char('u')));
+        }
         if view::filterable(app.screen) {
             hints.push(("/ filter", KeyCode::Char('/')));
         }
         hints.push(("Tab pane", KeyCode::Tab));
-        hints.push(("r refresh", KeyCode::Char('r')));
+        if app.chosen {
+            hints.push(("r refresh", KeyCode::Char('r')));
+        } else {
+            hints.push(("Enter use", KeyCode::Enter));
+        }
         if app::can_be_live(app.screen) {
             hints.push(("l live", KeyCode::Char('l')));
         }

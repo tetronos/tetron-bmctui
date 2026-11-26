@@ -190,6 +190,9 @@ pub struct App {
     pub t: Target,
     pub hosts: Vec<Target>,
     pub current: usize,
+    /// False until a host has been chosen. Until then nothing contacts a BMC
+    /// and only the host list can be used.
+    pub chosen: bool,
     pub states: Vec<HostState>,
     pub epoch: u64,
     pub screen: Screen,
@@ -276,6 +279,7 @@ impl App {
             states: vec![HostState::default(); hosts.len()],
             hosts,
             current,
+            chosen: true,
             epoch: 0,
             screen: Screen::Dash,
             data: HashMap::new(),
@@ -328,11 +332,30 @@ impl App {
         }
     }
 
+    // ----- start ------------------------------------------------------------
+
+    /// Start on the host list with no host in use.
+    pub fn start_unchosen(&mut self) {
+        self.chosen = false;
+        self.screen = Screen::Hosts;
+        self.cursor = 1;
+        self.nav_cursor = NAV.iter().position(|s| *s == Screen::Hosts).unwrap_or(0);
+        self.status = "choose a host: Enter or [ Use ]. a adds one.".into();
+    }
+
+    /// Say why something is not available yet. True while no host is chosen.
+    fn needs_host(&mut self) -> bool {
+        if !self.chosen {
+            self.status = "choose a host first: select it, then Enter or [ Use ]".into();
+        }
+        !self.chosen
+    }
+
     // ----- fetching ---------------------------------------------------------
 
     /// Fetch a screen in a worker thread. At most one fetch per screen runs.
     pub fn refresh(&mut self, s: Screen) {
-        if matches!(s, Screen::Hosts | Screen::Console) || !self.loading.insert(s) {
+        if !self.chosen || matches!(s, Screen::Hosts | Screen::Console) || !self.loading.insert(s) {
             return;
         }
         self.last.insert(s, Instant::now());
@@ -345,7 +368,7 @@ impl App {
     /// Ask the BMC for its manufacturer id, which the fan screen depends on,
     /// and then for its own address.
     pub fn start_vendor(&mut self) {
-        if self.vendor_pending {
+        if !self.chosen || self.vendor_pending {
             return;
         }
         self.vendor_pending = true;
@@ -496,9 +519,11 @@ impl App {
             self.status = format!("there is no host {}", i + 1);
             return;
         };
-        if i == self.current {
+        let first = !self.chosen;
+        if i == self.current && !first {
             return;
         }
+        self.chosen = true;
         self.lock("writes locked");
         self.queue.clear();
         self.want_sol = false;
@@ -522,8 +547,12 @@ impl App {
         }
         self.filter.clear();
         self.filtering = false;
-        // The host screen stays as it is. Other screens are fetched again.
-        if self.screen != Screen::Hosts {
+        // The first choice opens the overview. Later the host screen stays as
+        // it is, and other screens are fetched again.
+        if first {
+            self.switch(Screen::Dash);
+            self.focus = self.pane_cycle().into_iter().find(|p| *p != Pane::Nav).unwrap_or(Pane::Main);
+        } else if self.screen != Screen::Hosts {
             self.switch(self.screen);
         }
     }
@@ -625,7 +654,7 @@ impl App {
                 }
                 // No path here: the status line would cut it off.
                 let gone = if c.removed.is_some() { " Old password file deleted." } else { "" };
-                let next = if i == self.current { " Open a screen and press r to try it." } else { "" };
+                let next = if i == self.current && self.chosen { " Open a screen and press r to try it." } else { "" };
                 self.status = format!("saved password changed for {}.{next}{gone}", self.hosts[i].label());
             }
             Err(e) => {
@@ -682,6 +711,9 @@ impl App {
     }
 
     pub fn open_power_menu(&mut self) {
+        if self.needs_host() {
+            return;
+        }
         self.prefix_pending = false;
         self.filtering = false;
         self.power_cursor = 0;
@@ -924,7 +956,8 @@ impl App {
             cursor: self.cursor,
             loading: self.loading.contains(&self.screen),
             hosts: &self.hosts,
-            current: self.current,
+            // No row is marked as in use before a choice.
+            current: if self.chosen { self.current } else { usize::MAX },
             lan: self.states[self.current].lan.as_ref(),
             efi_boot: self.efi_boot,
         })
@@ -1156,6 +1189,9 @@ impl App {
     /// Open a navigation entry (Enter in the navigation pane, or a click).
     fn activate_nav(&mut self, i: usize) {
         let Some(&screen) = NAV.get(i) else { return };
+        if screen != Screen::Hosts && self.needs_host() {
+            return;
+        }
         self.nav_cursor = i;
         self.switch(screen);
         self.focus = if self.pane_cycle().contains(&Pane::Main) { Pane::Main } else { Pane::Details };
@@ -1173,6 +1209,9 @@ impl App {
     }
 
     fn toggle_lock(&mut self) {
+        if self.needs_host() {
+            return;
+        }
         if self.unlocked {
             self.lock("locked: read-only");
         } else {
@@ -1322,6 +1361,9 @@ impl App {
             KeyCode::Char('d') => self.toggle_details(),
             KeyCode::Char('u') => self.toggle_lock(),
             KeyCode::Char('S') => self.open_sol(),
+            KeyCode::Char('r') if !self.chosen => {
+                self.needs_host();
+            }
             KeyCode::Char('r') => {
                 self.states[self.current].halt_auto = false;
                 if self.vendor.is_none() || self.states[self.current].lan.is_none() {
@@ -2069,6 +2111,65 @@ mod tests {
     }
 
     /// The buttons belong to the list, not to the details of one host.
+    #[test]
+    fn nothing_is_contacted_until_a_host_is_chosen() {
+        let mut a = two_hosts();
+        a.loading.clear();
+        a.start_unchosen();
+        ui::draw(&mut a, 120, 28);
+        let untouched = |a: &App| a.loading.is_empty() && !a.unlocked && !a.want_connect && !a.want_sol && a.queue.is_empty();
+        for k in ['r', 'u', 'p', 'l', 'S', 't', '/'] {
+            press(&mut a, KeyCode::Char(k));
+            assert!(matches!(a.mode, Mode::Normal) && untouched(&a), "{k}");
+        }
+        press(&mut a, KeyCode::Down);
+        for i in 0..NAV.len() {
+            click(&mut a, Hit::Nav(i));
+            assert!(a.screen == Screen::Hosts && untouched(&a), "nav {i}");
+        }
+        click(&mut a, Hit::Power);
+        click(&mut a, Hit::Row(2));
+        a.tick(Instant::now() + Duration::from_secs(3600));
+        assert!(!a.chosen && untouched(&a));
+        let c = ui::draw(&mut a, 120, 28);
+        let text: String = (0..28).map(|y| c.row(y)).collect();
+        assert!(!text.contains("* one") && !text.contains("* two") && text.contains("no host chosen"), "{text}");
+    }
+
+    #[test]
+    fn choosing_the_first_or_another_host_connects_to_it() {
+        // Enter on the first row, which has the same index as the unused default.
+        for (how, want) in [(0, 0), (1, 1), (2, 1), (3, 0)] {
+            let mut a = two_hosts();
+            a.loading.clear();
+            a.start_unchosen();
+            ui::draw(&mut a, 120, 28);
+            match how {
+                0 => press(&mut a, KeyCode::Enter),
+                1 => {
+                    click(&mut a, Hit::Row(2));
+                    click(&mut a, Hit::UseHost);
+                }
+                2 => press(&mut a, KeyCode::Char('2')),
+                _ => click(&mut a, Hit::Host(0)),
+            }
+            assert!(a.chosen && a.current == want && a.t == a.hosts[want], "way {how}");
+            assert!(a.screen == Screen::Dash && a.loading.contains(&Screen::Dash), "way {how}");
+        }
+    }
+
+    #[test]
+    fn hosts_can_be_managed_before_choosing() {
+        let mut a = two_hosts();
+        a.loading.clear();
+        a.start_unchosen();
+        press(&mut a, KeyCode::Char('w'));
+        assert!(matches!(a.mode, Mode::AddHost(_)));
+        press(&mut a, KeyCode::Esc);
+        press(&mut a, KeyCode::Char('a'));
+        assert!(matches!(a.mode, Mode::AddHost(_)) && !a.chosen && a.loading.is_empty());
+    }
+
     #[test]
     fn host_buttons_are_in_the_list_pane_at_every_size() {
         let mut a = two_hosts();

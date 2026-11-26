@@ -33,8 +33,10 @@ const USAGE: &str = "tetron-bmctui: terminal UI for server BMCs, using ipmitool 
 usage: tetron-bmctui [connection] [options]
        tetron-bmctui [connection] --dump SCREEN
 
-Connection: one host from the command line, or a host list. With neither,
-ipmitool talks to the local BMC (/dev/ipmi0).
+Connection: one host from the command line, or a host list. Without -H,
+BMC_HOST or --select the program starts on the host list and contacts nothing
+until a host is chosen. With no saved hosts the list offers this machine's own
+BMC (/dev/ipmi0).
   -H host             BMC address (env BMC_HOST)
   -U user             BMC user (env BMC_USER)
   -I iface            lanplus (default) or lan
@@ -101,12 +103,19 @@ struct Opts {
     efi_boot: bool,
     /// Seconds between Live refreshes when asked for at startup. 0 is off.
     refresh: u64,
+    /// Whether a host was named. If not, the program starts on the host list.
+    chosen: bool,
     /// A problem to show once the program runs.
     warning: Option<String>,
     /// Where added hosts are saved: the list in use, or the default one.
     list_path: Option<PathBuf>,
     console_mono: bool,
     export_dir: Option<PathBuf>,
+}
+
+/// Linux device names of a local BMC, the ones ipmitool tries.
+fn has_local_bmc() -> bool {
+    ["/dev/ipmi0", "/dev/ipmi/0", "/dev/ipmidev/0"].iter().any(|p| Path::new(p).exists())
 }
 
 /// "80x24" -> (80, 24), within sizes a console can sensibly have.
@@ -206,12 +215,19 @@ fn parse_args() -> Result<Opts, String> {
     }
     let mut warning = None;
     let list_path = list.clone().or_else(hosts::default_path);
+    // With no host named, the program asks which one before contacting any.
+    // A host from the command line, or --select, is the choice already.
+    let chosen = t.host.is_some() || select.is_some();
     let (hosts, current) = match list {
         Some(path) => {
             if single_flags {
                 return Err(format!("-U, -I and --pass-file do not apply to the host list {}", path.display()));
             }
-            let all = hosts::load(&path, &t.bin)?;
+            let mut all = hosts::load(&path, &t.bin)?;
+            // The BMC of this machine can be picked too, if there is one.
+            if has_local_bmc() {
+                all.push(t.clone());
+            }
             let current = match &select {
                 Some(n) => all.iter().position(|h| h.name.as_ref() == Some(n)).ok_or(format!("no host named {n} in {}", path.display()))?,
                 None => 0,
@@ -242,7 +258,7 @@ fn parse_args() -> Result<Opts, String> {
             (all, current)
         }
     };
-    Ok(Opts { hosts, current, dump, relock, console, prefix, efi_boot, console_mono, export_dir, list_path, refresh, warning })
+    Ok(Opts { hosts, current, dump, relock, console, prefix, efi_boot, console_mono, export_dir, list_path, refresh, warning, chosen })
 }
 
 /// Raw mode, alternate screen and mouse capture. Dropping the guard restores
@@ -373,7 +389,7 @@ fn redraw(app: &mut App, out: &mut impl Write) -> io::Result<()> {
 }
 
 fn run(opts: Opts) -> io::Result<()> {
-    let Opts { hosts, current, relock, console, prefix, efi_boot, console_mono, export_dir, list_path, refresh, warning, .. } = opts;
+    let Opts { hosts, current, relock, console, prefix, efi_boot, console_mono, export_dir, list_path, refresh, warning, chosen, .. } = opts;
     let export_dir = export_dir.or_else(|| ipmi::state_dir().map(|d| d.join("exports")));
     let (tx, rx): (Sender<Msg>, Receiver<Msg>) = mpsc::channel();
     let mut app = App::new(hosts, current, relock, tx.clone());
@@ -385,7 +401,10 @@ fn run(opts: Opts) -> io::Result<()> {
     }
     if refresh > 0 {
         app.live_every = Duration::from_secs(refresh);
-        app.live = true;
+        app.live = chosen;
+    }
+    if !chosen {
+        app.start_unchosen();
     }
     app.console_mono = console_mono;
     // Threads that are ending console sessions.

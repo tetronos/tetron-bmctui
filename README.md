@@ -46,6 +46,10 @@ The program is then `target/release/tetron-bmctui`.
 
 ## Quick start
 
+Run `tetron-bmctui` with no options. It starts on the **Hosts** screen and contacts nothing until you choose a server. Press `a` or click `[ Add host ]` to add one, then select it and press `Enter` or click `[ Use ]`.
+
+You can also name a server on the command line:
+
 Put the BMC password in a file that only you can read:
 
     (umask 077; cat > ~/.bmc-pass)     # type the password, press Enter, then Ctrl-D
@@ -54,7 +58,7 @@ Connect, using the address and user of your BMC:
 
     tetron-bmctui -H 192.0.2.10 -U ADMIN --pass-file ~/.bmc-pass
 
-The `IPMI_PASSWORD` environment variable works instead of `--pass-file`. The password is never accepted on the command line. `BMC_HOST` and `BMC_USER` can replace `-H` and `-U`. Without a host, `ipmitool` talks to the local BMC.
+The `IPMI_PASSWORD` environment variable works instead of `--pass-file`. The password is never accepted on the command line. `BMC_HOST` and `BMC_USER` can replace `-H` and `-U`. The list offers this machine's own BMC when it has one, and also when you have no saved servers.
 
 To print one screen as text, for example in a script:
 
@@ -188,6 +192,8 @@ Fan modes use Supermicro-specific commands and are available on Supermicro BMCs 
 From the source folder, this runs the interface with fake readings. Actions are not sent to any hardware, but they are written to the audit log:
 
     env -u BMC_HOST -u BMC_USER target/release/tetron-bmctui --ipmitool "$PWD/tests/fake-ipmitool.sh"
+
+On the Hosts screen, select a server (`local` if you have no saved list) and press `Enter`.
 
 If you have a host list, add `XDG_CONFIG_HOME=/nonexistent` after `env -u BMC_HOST -u BMC_USER`.
 

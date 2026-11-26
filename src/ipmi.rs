@@ -10,7 +10,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub const SUPERMICRO_ID: u32 = 10876;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Target {
     pub bin: String,
     /// Name from the host list. `None` for a host given on the command line.

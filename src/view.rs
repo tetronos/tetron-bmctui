@@ -131,7 +131,7 @@ pub fn details(s: Screen, c: &Ctx, width: usize) -> Vec<Line> {
                 v.push((value, Kind::Normal));
             }
             // Also here, for terminals too narrow to show it in the top bar.
-            if c.cursor == c.current + 1
+            if c.cursor.checked_sub(1) == Some(c.current)
                 && let Some(lan) = c.lan
             {
                 for (name, value) in [("BMC IP", &lan.ip), ("BMC MAC", &lan.mac)] {
@@ -273,7 +273,9 @@ fn hosts_screen(c: &Ctx) -> Vec<Line> {
         v.push((line, Kind::Normal));
     }
     v.push((String::new(), Kind::Normal));
-    v.push(("* is in use. Enter uses the selected one.".into(), Kind::Dim));
+    // `current` is out of range while no host has been chosen.
+    let note = if c.current < c.hosts.len() { "* is in use. Enter uses the selected one." } else { "Select a host, then Enter or [ Use ]." };
+    v.push((note.into(), Kind::Dim));
     v
 }
 
