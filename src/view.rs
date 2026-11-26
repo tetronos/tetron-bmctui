@@ -270,11 +270,12 @@ fn hosts_screen(c: &Ctx) -> Vec<Line> {
     for (i, h) in c.hosts.iter().enumerate() {
         let mark = if i == c.current { "*" } else { " " };
         let line = format!("{mark} {:<16} {:<24} {}", h.label(), h.host.as_deref().unwrap_or("in-band"), h.user.as_deref().unwrap_or(""));
-        v.push((line, Kind::Normal));
+        // Bold marks the host in use also while another row is selected.
+        v.push((line, if i == c.current { Kind::Head } else { Kind::Normal }));
     }
     v.push((String::new(), Kind::Normal));
     // `current` is out of range while no host has been chosen.
-    let note = if c.current < c.hosts.len() { "* is in use. Enter uses the selected one." } else { "Select a host, then Enter or [ Use ]." };
+    let note = if c.current < c.hosts.len() { "* is in use. Enter connects the selected one." } else { "Select, then Enter, click again, or Connect." };
     v.push((note.into(), Kind::Dim));
     v
 }

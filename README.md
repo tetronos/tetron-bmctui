@@ -46,7 +46,7 @@ The program is then `target/release/tetron-bmctui`.
 
 ## Quick start
 
-Run `tetron-bmctui` with no options. It starts on the **Hosts** screen and contacts nothing until you choose a server. Press `a` or click `[ Add host ]` to add one, then select it and press `Enter` or click `[ Use ]`.
+Run `tetron-bmctui` with no options. It starts on the **Hosts** screen and contacts nothing until you choose a server. Press `a` or click `[ Add host ]` to add one, then select it and press `Enter` or click `[ Connect ]`.
 
 You can also name a server on the command line:
 
@@ -68,7 +68,7 @@ Run `tetron-bmctui --help` for all options.
 
 ## Several servers
 
-**Picking a server:** click its tab in the top bar or press its number. On the **Hosts** screen, click or move to a server to select it, then press `Enter` or click `[ Use ]`. Selecting alone does not contact it.
+**Picking a server:** click its tab in the top bar or press its number. On the **Hosts** screen, click or move to a server to select it. To connect, press `Enter`, click its row again, or click `[ Connect ]`. Selecting alone does not contact it.
 
 **Changing a saved password:** select the server on the Hosts screen and press `w` or click `[ Password ]`. Give another password file or type the new password. This changes only what is saved on your computer. **It does not change the password on the BMC.** If the old password was in a file that this program wrote and no other server uses it, that file is deleted. Your own files are never deleted. Nothing logs in with the new password until you ask, for example with `r`.
 

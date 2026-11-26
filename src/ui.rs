@@ -129,7 +129,8 @@ fn host_bar(app: &mut App, c: &mut Canvas) {
         first += 1;
     }
     for (i, tab) in tabs.iter().enumerate().skip(first) {
-        let kind = if i == app.current && app.chosen { Kind::Head } else { Kind::Dim };
+        // The host in use stands out in reverse video.
+        let kind = if i == app.current && app.chosen { Kind::Sel } else { Kind::Dim };
         // The current tab is cut off rather than left out on a tiny screen.
         let label = if i == app.current { &tab[..tab.len().min(room.saturating_sub(x))] } else { tab.as_str() };
         if label.is_empty() || x + label.len() > room {
@@ -169,19 +170,36 @@ fn draw_nav(app: &mut App, c: &mut Canvas, r: Rect) {
     }
 }
 
-/// The actions of the host list. The middle one depends on the selected host.
-fn host_buttons(app: &mut App, c: &mut Canvas, x: usize, y: usize) {
-    let mut x = button(app, c, x, y, "[ Add host ]", Hit::AddHost, Kind::Head) + 1;
-    if let Some(i) = app.selected_host() {
-        let listed = app.hosts[i].name.is_some();
-        let (label, hit) = if listed { ("[ Password ]", Hit::HostPassword) } else { ("[ Save host ]", Hit::SaveToList) };
-        // The local BMC has neither a password nor anything to save.
-        if listed || app.hosts[i].host.is_some() {
-            x = button(app, c, x, y, label, hit, Kind::Head) + 1;
-        }
-        let kind = if i == app.current && app.chosen { Kind::Dim } else { Kind::Head };
-        // A narrower label keeps all three on a 40 column terminal.
-        button(app, c, x, y, "[ Use ]", Hit::UseHost, kind);
+/// The actions of the host list. Connect comes first, then what can be done
+/// with the list. `end` is the first column the buttons must not reach.
+fn host_buttons(app: &mut App, c: &mut Canvas, x: usize, y: usize, end: usize) {
+    let Some(i) = app.selected_host() else {
+        button(app, c, x, y, "[ Add host ]", Hit::AddHost, Kind::Head);
+        return;
+    };
+    let listed = app.hosts[i].name.is_some();
+    let in_use = i == app.current && app.chosen;
+    // The local BMC has neither a password nor anything to save.
+    let second = if listed {
+        Some(("[ Password ]", Hit::HostPassword))
+    } else {
+        app.hosts[i].host.is_some().then_some(("[ Save host ]", Hit::SaveToList))
+    };
+    let rest = "[ Add host ]".len() + 1 + second.map_or(0, |(l, _)| l.len() + 1);
+    // The name is on the button when everything still fits.
+    let named = format!("[ Connect to {} ]", app.hosts[i].label());
+    let label = if in_use {
+        "[ In use ]"
+    } else if x + named.len() + rest < end {
+        &named
+    } else {
+        "[ Connect ]"
+    };
+    let kind = if in_use { Kind::Dim } else { Kind::Sel };
+    let mut x = button(app, c, x, y, label, Hit::UseHost, kind) + 1;
+    x = button(app, c, x, y, "[ Add host ]", Hit::AddHost, Kind::Head) + 1;
+    if let Some((label, hit)) = second {
+        button(app, c, x, y, label, hit, Kind::Head);
     }
 }
 
@@ -364,7 +382,8 @@ fn draw_main(app: &mut App, c: &mut Canvas, r: Rect) {
     let selected = app.selected_line();
     // Menu screens mark their selection in `view`, other screens get the
     // highlight here.
-    let plain = app.menu().is_empty() && matches!(app.data.get(&app.screen), Some(Ok(_)));
+    // The host list is local and never has fetched data.
+    let plain = app.menu().is_empty() && (app.screen == Screen::Hosts || matches!(app.data.get(&app.screen), Some(Ok(_))));
     for (row, (i, (text, kind))) in lines.iter().enumerate().skip(app.scroll).take(a.h).enumerate() {
         let kind = if plain && i == selected && app.focus != Pane::Nav { Kind::Sel } else { *kind };
         // One column of padding on each side of the text.
@@ -374,7 +393,7 @@ fn draw_main(app: &mut App, c: &mut Canvas, r: Rect) {
     if let Some(last) = buttons_row {
         // Right below the list when it is short, else in the last row.
         let y = last.min(a.y + lines.len().saturating_sub(app.scroll) + 1);
-        host_buttons(app, c, a.x + 1, y);
+        host_buttons(app, c, a.x + 1, y, a.x + a.w);
     }
     // Show that there is more above or below.
     if app.scroll > 0 {
@@ -473,7 +492,7 @@ fn key_hints(app: &mut App, c: &mut Canvas, y: usize) {
         if app.chosen {
             hints.push(("r refresh", KeyCode::Char('r')));
         } else {
-            hints.push(("Enter use", KeyCode::Enter));
+            hints.push(("Enter connect", KeyCode::Enter));
         }
         if app::can_be_live(app.screen) {
             hints.push(("l live", KeyCode::Char('l')));

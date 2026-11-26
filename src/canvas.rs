@@ -167,6 +167,12 @@ impl Canvas {
         }
     }
 
+    /// The style of one cell, for tests of what is highlighted.
+    #[cfg(test)]
+    pub fn kind(&self, x: usize, y: usize) -> Kind {
+        self.cells[y * self.w + x].1
+    }
+
     /// One row as plain text. Tests use this to check what would be shown.
     #[cfg(test)]
     pub fn row(&self, y: usize) -> String {

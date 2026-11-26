@@ -193,6 +193,8 @@ pub struct App {
     /// False until a host has been chosen. Until then nothing contacts a BMC
     /// and only the host list can be used.
     pub chosen: bool,
+    /// The host row of the last click. A second click on it connects.
+    clicked_host: Option<usize>,
     pub states: Vec<HostState>,
     pub epoch: u64,
     pub screen: Screen,
@@ -280,6 +282,7 @@ impl App {
             hosts,
             current,
             chosen: true,
+            clicked_host: None,
             epoch: 0,
             screen: Screen::Dash,
             data: HashMap::new(),
@@ -340,13 +343,13 @@ impl App {
         self.screen = Screen::Hosts;
         self.cursor = 1;
         self.nav_cursor = NAV.iter().position(|s| *s == Screen::Hosts).unwrap_or(0);
-        self.status = "choose a host: Enter or [ Use ]. a adds one.".into();
+        self.status = "choose a host: select it, then Enter or [ Connect ]. a adds one.".into();
     }
 
     /// Say why something is not available yet. True while no host is chosen.
     fn needs_host(&mut self) -> bool {
         if !self.chosen {
-            self.status = "choose a host first: select it, then Enter or [ Use ]".into();
+            self.status = "choose a host first: select it, then Enter or [ Connect ]".into();
         }
         !self.chosen
     }
@@ -1168,6 +1171,7 @@ impl App {
             self.live = false;
         }
         self.screen = s;
+        self.clicked_host = None;
         self.filter.clear();
         self.filtering = false;
         self.scroll_mode = false;
@@ -1303,6 +1307,7 @@ impl App {
 
     pub fn key(&mut self, code: KeyCode, mods: KeyModifiers) {
         self.touch();
+        self.clicked_host = None;
         // The console sees keys first, so that Ctrl-C reaches the host.
         if matches!(self.mode, Mode::Normal) && self.console_key(code, mods) {
             return;
@@ -1464,10 +1469,17 @@ impl App {
                 self.focus = Pane::Main;
                 self.detail_scroll = 0;
                 if self.screen == Screen::Hosts {
-                    // A click only selects, so that a host's password can
-                    // be fixed without first logging in with it.
+                    // The first click only selects, so that a host's password
+                    // can be fixed without first logging in with it. A second
+                    // click on the same row connects.
                     if (1..=self.hosts.len()).contains(&line) {
+                        let again = self.clicked_host == Some(line) && self.cursor == line;
                         self.cursor = line;
+                        self.clicked_host = Some(line);
+                        if again {
+                            self.clicked_host = None;
+                            self.pick();
+                        }
                     }
                 } else if self.menu().is_empty() {
                     if line >= self.first_row() {
@@ -2168,6 +2180,74 @@ mod tests {
         press(&mut a, KeyCode::Esc);
         press(&mut a, KeyCode::Char('a'));
         assert!(matches!(a.mode, Mode::AddHost(_)) && !a.chosen && a.loading.is_empty());
+    }
+
+    /// Which host row is drawn highlighted.
+    fn highlighted_rows(a: &mut App) -> Vec<usize> {
+        let c = ui::draw(a, 120, 28);
+        let rows: Vec<(Rect, usize)> = a.hits.iter().filter_map(|(r, h)| if let Hit::Row(i) = h { Some((*r, *i)) } else { None }).collect();
+        rows.iter().filter(|(r, _)| c.kind(r.x + 3, r.y) == view::Kind::Sel).map(|(_, i)| *i).collect()
+    }
+
+    #[test]
+    fn the_selected_host_is_highlighted() {
+        let mut a = two_hosts();
+        a.loading.clear();
+        a.start_unchosen();
+        assert_eq!(highlighted_rows(&mut a), [1]);
+        press(&mut a, KeyCode::Down);
+        assert_eq!(highlighted_rows(&mut a), [2]);
+        click(&mut a, Hit::Row(1));
+        assert_eq!(highlighted_rows(&mut a), [1]);
+    }
+
+    #[test]
+    fn the_host_in_use_stands_out() {
+        let mut a = two_hosts();
+        a.switch_host(1);
+        a.switch(Screen::Hosts);
+        press(&mut a, KeyCode::Up);
+        let c = ui::draw(&mut a, 120, 28);
+        let at = |a: &App, h: Hit| a.hits.iter().rev().find(|(_, k)| *k == h).unwrap().0;
+        let (tab, other) = (at(&a, Hit::Host(1)), at(&a, Hit::Host(0)));
+        assert_eq!((c.kind(tab.x + 1, tab.y), c.kind(other.x + 1, other.y)), (view::Kind::Sel, view::Kind::Dim));
+        let (selected, in_use) = (at(&a, Hit::Row(1)), at(&a, Hit::Row(2)));
+        assert_eq!((c.kind(selected.x + 3, selected.y), c.kind(in_use.x + 3, in_use.y)), (view::Kind::Sel, view::Kind::Head));
+    }
+
+    #[test]
+    fn second_click_on_a_host_connects() {
+        let mut a = two_hosts();
+        a.loading.clear();
+        a.start_unchosen();
+        ui::draw(&mut a, 120, 28);
+        // The first row starts selected. One click must not connect.
+        click(&mut a, Hit::Row(1));
+        assert!(!a.chosen);
+        // Clicks on two different rows do not add up, nor does a key between.
+        click(&mut a, Hit::Row(2));
+        click(&mut a, Hit::Row(1));
+        press(&mut a, KeyCode::Down);
+        press(&mut a, KeyCode::Up);
+        click(&mut a, Hit::Row(1));
+        assert!(!a.chosen);
+        click(&mut a, Hit::Row(2));
+        click(&mut a, Hit::Row(2));
+        assert!(a.chosen && a.current == 1 && a.screen == Screen::Dash);
+    }
+
+    #[test]
+    fn connect_button_names_the_host_when_there_is_room() {
+        let mut a = two_hosts();
+        a.start_unchosen();
+        let text = |a: &mut App, w, h| {
+            let c = ui::draw(a, w, h);
+            (0..h).map(|y| c.row(y)).collect::<String>()
+        };
+        press(&mut a, KeyCode::Down);
+        assert!(text(&mut a, 120, 28).contains("[ Connect to two ]"));
+        let narrow = text(&mut a, 40, 12);
+        assert!(narrow.contains("[ Connect ]") && narrow.contains("[ Password ]"), "{narrow}");
     }
 
     #[test]

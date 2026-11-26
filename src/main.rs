@@ -337,7 +337,8 @@ fn add_host(app: &mut App, form: app::HostForm, list: Option<&Path>) {
     if let Some(who) = added {
         // Only the fact is logged, never what was typed besides name and address.
         let _ = ipmi::audit(&who, "added to the host list");
-        app.status = format!("added {who} to {}", list.display());
+        // What to do next comes first: the status line cuts off the end.
+        app.status = format!("added {who}. To connect, press Enter or click Connect.");
     }
 }
 
